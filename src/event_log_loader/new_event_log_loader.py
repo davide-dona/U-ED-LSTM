@@ -255,6 +255,20 @@ class TensorEncoderDecoder:
         for continuous_positive_column in continuous_positive_columns:
             self.continuous_imputers[continuous_positive_column] = self.__get_continuous_positive_imputer()
             self.continuous_encoders[continuous_positive_column] = self.__get_continuous_positive_encoder()
+
+    """
+    Old version:
+    
+    def train_imputers_encoders(self):
+        for col, categorical_encoder in self.categorical_encoders.items():
+            column_data = np.array(self.event_log[[col]], dtype=object)
+            categorical_encoder.fit(column_data)
+        for col, continuous_encoder in self.continuous_encoders.items():
+            continuous_imputer = self.continuous_imputers[col]
+            column_data = self.event_log[[col]]
+            column_data = continuous_imputer.fit_transform(column_data)
+            continuous_encoder.fit(column_data)
+    """
     
     def train_imputers_encoders(self):
         # categorical encoders: fit on 2D numpy arrays with dtype=object
@@ -269,36 +283,6 @@ class TensorEncoderDecoder:
             column_data = continuous_imputer.fit_transform(column_data)  # still (n,1)
             continuous_encoder.fit(column_data)  # StandardScaler or custom transformer expects 2D
 
-    def _single_encode_categorical_column(self,
-                                          df_case : pd.DataFrame,
-                                          col : str) -> torch.Tensor:
-        case_values = np.array(df_case[[col]], dtype=object)
-        case_values_enc = self.categorical_encoders[col].transform(case_values) + 1  # shape (n,1)
-        # Pad encodings - clearer prefix loop (prefix_len from min_suffix_size .. len)
-        case_values_enc_pad = self.pad_to_window_size(case_values_enc)
-        return torch.tensor(np.array(case_values_enc_pad, dtype=int), dtype=torch.long).squeeze(-1).unsqueeze(0)
-    
-    def _single_encode_continuous_column(self,
-                                         df_case : pd.DataFrame,
-                                         col : str) -> torch.Tensor:
-        case_values = df_case[[col]].values  # shape (n,1)
-        case_values_imputed = self.continuous_imputers[col].transform(case_values)
-        case_values_enc = self.continuous_encoders[col].transform(case_values_imputed)
-        case_values_enc_pad = self.pad_to_window_size(case_values_enc)
-        return torch.tensor(np.array(case_values_enc_pad, dtype=float), dtype=torch.float).squeeze(-1).unsqueeze(0)
-
-    def encode_case(self,
-                    df_case : pd.DataFrame) -> tuple[tuple[torch.Tensor], tuple[torch.Tensor]]:
-        categorical_tensors = []
-        continuous_tensors = []
-        for col in self.categorical_columns:
-            cat_columns = self._single_encode_categorical_column(df_case, col)
-            categorical_tensors.append(cat_columns)
-        for col in self.continuous_columns + self.continuous_positive_columns:
-            cont_columns = self._single_encode_continuous_column(df_case, col)
-            continuous_tensors.append(cont_columns)
-        return tuple(categorical_tensors), tuple(continuous_tensors)
-
     def encode_df(self, df) -> tuple[tuple[torch.Tensor, torch.Tensor, tuple],
                                      tuple[list[tuple[str, int, dict[str : int]]]]]:
         categorical_tensors = []
@@ -306,7 +290,7 @@ class TensorEncoderDecoder:
         all_categories = [[], []]
         for col in tqdm(self.categorical_columns, desc='categorical tensors'):
             if col == self.concept_name:
-                case_ids, enc_column, eos_paddings, categories, max_classes = self.encode_categorical_column(df, col, return_case_ids_and_eos_paddings=True)
+                case_ids, enc_column, categories, max_classes = self.encode_categorical_column(df, col, return_case_ids=True)
             else:
                 enc_column, categories, max_classes = self.encode_categorical_column(df, col)
             categorical_tensors.append(enc_column)
@@ -315,13 +299,12 @@ class TensorEncoderDecoder:
         for col in tqdm(self.continuous_columns + self.continuous_positive_columns, desc='continouous tensors'):
             continuous_tensors.append(self.encode_continuous_column(df, col))
             all_categories[1].append((col, 1, dict()))
-        return (tuple(categorical_tensors), tuple(continuous_tensors), tuple(eos_paddings), tuple(case_ids)), tuple(all_categories)
+        return (tuple(categorical_tensors), tuple(continuous_tensors), tuple(case_ids)), tuple(all_categories)
 
     # Corrected verison:
-    def encode_categorical_column(self, df, col, return_case_ids_and_eos_paddings=False):
+    def encode_categorical_column(self, df, col, return_case_ids=False):
         grouped = df.groupby(self.case_name)
         windows = []
-        padding_windows = []
         categories = {category: idx + 1 for idx, category in enumerate(self.categorical_encoders[col].categories_[0])}
         
         case_ids = []
@@ -333,19 +316,9 @@ class TensorEncoderDecoder:
             for prefix_len in range(self.min_suffix_size, len(case_values_enc) + 1):
                 padded_encodings.append(self.pad_to_window_size(case_values_enc[:prefix_len]))
             windows.extend(padded_encodings)
-            if return_case_ids_and_eos_paddings:
+            if return_case_ids:
                 # append one case id per generated window (not per original row)
                 case_ids.extend([case_id] * len(padded_encodings))
-                eos_paddings = []
-                for prefix_len in range(self.min_suffix_size, len(case_values_enc) + 1):
-                    # one EOS is okay the rest is padding
-                    padding_len = len(case_values_enc) - prefix_len  - self.min_suffix_size + 1
-                    if  padding_len < 0:
-                        eos_padding = [[1]] * (self.window_size + padding_len) + [[0]] * -padding_len
-                    else:
-                        eos_padding = [[1]] * self.window_size
-                    eos_paddings.append(eos_padding)
-                padding_windows.extend(eos_paddings)
 
         if len(windows) == 0:
             # avoid creating empty numpy array with ambiguous dtype
@@ -355,12 +328,61 @@ class TensorEncoderDecoder:
         t = torch.tensor(padded_array, dtype=torch.long)
 
         max_classes = len(self.categorical_encoders[col].categories_[0]) + 1
-        if return_case_ids_and_eos_paddings:
-            eos_padded_array = np.array(padding_windows, dtype=int)
-            eos_padded_tensor = torch.tensor(eos_padded_array, dtype=torch.long)
-            return case_ids, t.squeeze(-1), eos_padded_tensor.squeeze(-1), categories, max_classes
+        if return_case_ids:
+            return case_ids, t.squeeze(-1), categories, max_classes
         else:
             return t.squeeze(-1), categories, max_classes
+
+    """
+    Old version:
+    
+    def encode_categorical_column(self, df, col, return_case_ids=False):
+        grouped = df.groupby(self.case_name)
+        windows = []
+        categories = {category: idx + 1 for idx, category in enumerate(self.categorical_encoders[col].categories_[0])}
+        
+        case_ids = []
+        for case_id, group in tqdm(grouped, desc=col, leave=False):
+            if return_case_ids:
+                case_ids.extend([case_id] * len(group))
+            case_values = np.array(group[[col]], dtype=object)
+            case_values_enc = self.categorical_encoders[col].transform(case_values) + 1
+            # Pad encodings
+            padded_encodings = []
+            for i in range(self.min_suffix_size - 1, len(case_values_enc)):
+                padded_encodings.append(self.pad_to_window_size(case_values_enc[:i+1]))
+            windows.extend(padded_encodings)
+        
+        # Convert to tensor
+        padded_array = np.array(windows, dtype=int)
+        t = torch.tensor(padded_array, dtype=torch.long)
+        
+        max_classes = len(self.categorical_encoders[col].categories_[0]) + 1
+        if return_case_ids:
+            return case_ids, t.squeeze(-1), categories, max_classes
+        else:
+            return t.squeeze(-1), categories, max_classes   
+    """
+
+    """
+    Old version:
+    
+    def encode_continuous_column(self, df, col):
+        grouped = df.groupby(self.case_name)
+        windows = []
+        for case_id, group in tqdm(grouped, desc=col, leave=False):
+            case_values = group[[col]]
+            case_values_enc = self.continuous_imputers[col].transform(case_values)
+            case_values_enc = self.continuous_encoders[col].transform(case_values_enc)
+            padded_encodings = []
+            for i in range(self.min_suffix_size - 1, len(case_values_enc)):
+                padded_encodings.append(self.pad_to_window_size(case_values_enc[:i+1]))
+            windows.extend(padded_encodings)
+        # Convert to tensor
+        padded_array = np.array(windows)
+        t = torch.tensor(padded_array, dtype=torch.float32)
+        return t.squeeze(-1)
+    """
     
     def encode_continuous_column(self, df, col):
         grouped = df.groupby(self.case_name)
@@ -379,6 +401,17 @@ class TensorEncoderDecoder:
             padded_array = np.array(windows, dtype=float)
         t = torch.tensor(padded_array, dtype=torch.float32)
         return t.squeeze(-1)
+    
+    """
+    Old version
+    
+    def pad_to_window_size(self, previous_values):
+        if len(previous_values) > self.window_size:
+            return previous_values[-self.window_size:].tolist()
+        else:
+            return [[0.0]] * (self.window_size - len(previous_values)) \
+                   + previous_values[-self.window_size:].tolist()
+    """
     
     def pad_to_window_size(self, previous_values):
         """
@@ -462,7 +495,6 @@ class EventLogDataset(Dataset):
         self.tensor_list : tuple = tensor_tuple
         self.all_categories : tuple[list[tuple[str, int, dict[str : int]]]] = all_categories
         self.encoder_decoder : TensorEncoderDecoder = encoder_decoder
-        self.min_suffix_size : Optional[int] = getattr(encoder_decoder, 'min_suffix_size', None)
 
     def __len__(self):
         if len(self.tensor_list[0]):
@@ -480,5 +512,5 @@ class EventLogDataset(Dataset):
         for i in self.tensor_list[1]:
             cont.append(i[idx])
         #case ids
-        case_id = self.tensor_list[3][idx]
-        return (tuple(cat), tuple(cont), self.tensor_list[2][idx], case_id)
+        case_id = self.tensor_list[2][idx]
+        return (tuple(cat), tuple(cont), case_id)

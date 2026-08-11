@@ -5,16 +5,10 @@ Uses gradient normalization (GradNorm) technique to balance task losses dynamica
 - Chen Z. et.al, GradNorm: "Gradient Normalization for Adaptive Loss Balancing in Deep Multitask Networks", ICML, 2018.
 """
 
-# performance imports for torch: torch kernel uses one core only.
-import os
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["TORCH_NUM_THREADS"] = "1" 
-
 import torch
 from torch.utils.data import DataLoader
 from tqdm.notebook import tqdm
-from typing import Optional
+import numpy as np
 
 class Trainer:
     def __init__(self,
@@ -27,10 +21,9 @@ class Trainer:
                  optimize_values,
                  suffix_data_split_value,
                  writer,
-                 gradnorm_values=None,
                  save_model_n_th_epoch: int = 0,
                  saving_path: str = 'model.pkl',
-                 random_suffix_split: bool = False):
+                 gradnorm_values=None):
         """
         Trainer class constructor.
         
@@ -41,22 +34,19 @@ class Trainer:
         - data_val: Validation data.
         - loss_obj: object for loss functions
         - log_normal_loss_num_feature: list of strings of num feaures that follow log normal distribution.
-        
         - optimize_values:
             - regularization_term: L2 regularization for weights, biases, and dropout of stochastic model. 
             - optimizer: Optimization algorithm for training.
             - epochs: Epochs the model trains the full training dataset.
             - mini_batches: Batches the model get passed at once.
             - shuffles: Shuffle batches.
-            - min teacher_forcing_ratio: Value [0,1) that is used to decide if predicted or next target event is used for next prediction by model.
-            - max teacher_forcing_ratio: Value [0,1) that is used to decide if predicted or next target event is used for next prediction by model.
+            - teacher_forcing_ratio: Value [0,1) that is used to decide if predicted or next target event is used for next prediction by model.
+            - gradnorm: 
         
         - suffix_data_split_value: Number of last values of suffix events. 
-        
         - writer
         - save_model_n_th_epoch: int,
         - saving_path: str, default: 'model.pkl'
-        - random_suffix_split: bool, default: False. If True, randomly splits prefix/suffix per batch.
         
         - gradnorm_values:
             - use_gradnorm: Boolean value if gradnorm should be used or not.
@@ -73,10 +63,8 @@ class Trainer:
         print("Device: ", device)
         self.model = model.to(device)
         print("Model: ", model)
-        
         self.data_train = data_train
         print("Train Dataset: ", data_train)
-        
         self.data_val = data_val
         print("Validation Dataset: ", data_val)
         
@@ -101,12 +89,12 @@ class Trainer:
         print("Shuffle batched dataset: ", self.shuffle)
         
         # Teacher forcing
-        self.min_teacher_forcing_value = optimize_values["min_teacher_forcing_value"]
-        self.max_teacher_forcing_value = optimize_values["max_teacher_forcing_value"]
+        self.teacher_forcing_ratio = optimize_values["teacher_forcing_ratio"]
+        print("Teacher forcing ratio: ", self.teacher_forcing_ratio)
+        self.teacher_forcing_init = float(self.teacher_forcing_ratio)  # e.g. 1.0
         
         # Events in sufffix: Dependent on data set
         self.suffix_data_split_value = suffix_data_split_value
-        self.random_suffix_split = random_suffix_split
         
         # TensorBoard
         self.writer = writer
@@ -117,36 +105,33 @@ class Trainer:
 
         # Gradnorm parameters
         self.gradnorm_values = gradnorm_values
-        self.use_gradnorm = False
         if gradnorm_values is not None:
             self.use_gradnorm = gradnorm_values["use_gradnorm"]
             print("Use GradNorm: ", self.use_gradnorm)
+            
             if self.use_gradnorm:
                 self.gn_alpha = gradnorm_values["gn_alpha"]
                 print("GradNorm alpha: ", self.gn_alpha)
                 self.gn_learning_rate = gradnorm_values["gn_learning_rate"]
                 print("GradNorm learning rate: ", self.gn_learning_rate)
                 self.number_tasks = gradnorm_values["number_tasks"]
-                self.gn_weights = torch.nn.Parameter(torch.ones(self.number_tasks, dtype=torch.float, device=self.device))
+                
+                self.gn_weights = torch.nn.Parameter(torch.ones(self.number_tasks, dtype=torch.float))
                 print("Initial GradNorm loss weights: ",self.gn_weights)
                 self.l0 = None
                 print("Initial loss values: ", self.l0)
+                
                 # Use same optimizer as for the model optimization
                 self.gn_optimizer = torch.optim.AdamW(params=[self.gn_weights], lr=self.gn_learning_rate)
                 print("GradNorm optimizer: ", self.gn_optimizer)
     
-    def train_model(self, use_statics:Optional[bool]=False, use_zero_padd_masking:Optional[bool]=False, use_eos_padd_masking:Optional[bool]=False):
+    def train_model(self):
         """
         Seq2Seq Multi Task Learning algorithm with uncertainties.
         
-        INPUTS:
-        - use_statics:
-        - use_zero_padd_masking:
-        - use_eos_padd_masking:
-        
-        OUTPUTS:
+        Returns:
         - train_attenuated_losses:
-        - val_losses
+        - val_losses:
         - val_attenuated_losses
         """
         # Train the model
@@ -159,12 +144,19 @@ class Trainer:
 
         # Validation dataloader
         val_dataloader = DataLoader(dataset=self.data_val, batch_size=self.mini_batches, shuffle=self.shuffle, num_workers=4, pin_memory=True)
-                
+        
+        # Teacher forcing reducing index:
+        k = 1
+
+        # choose sigmoid teacher forcing hyperparams (tweak to taste)
+        midpoint = 0.5 * self.epochs          # default: halfway through training
+        scale = 0.1 * self.epochs             # default: transition width (10% of total epochs)
+        
         # Trainings/ Epoch Loop
-        for epoch in range(self.epochs):#tqdm(range(self.epochs)):
+        for epoch in tqdm(range(self.epochs)):
             
             # Train dataloader
-            train_dataloader = DataLoader(dataset=self.data_train, batch_size=self.mini_batches, shuffle=self.shuffle, num_workers=0, pin_memory=True)
+            train_dataloader = DataLoader(dataset=self.data_train, batch_size=self.mini_batches, shuffle=self.shuffle, num_workers=4, pin_memory=True)
             
             epoch_cat_loss = {}
             epoch_num_loss = {}
@@ -172,20 +164,26 @@ class Trainer:
             epoch_loss = 0.0
             num_batches_per_epoch = 0.0
             
-            # Reduce Teacher forcing ratio dynamically (scheduled sampling)
-            self.teacher_forcing_ratio = max(self.min_teacher_forcing_value, self.max_teacher_forcing_value - epoch / (self.epochs * 0.5))
-            
+            # Reduce Teacher forcing ratio dynamically:
+            if epoch >= ((self.epochs * k) / 5):
+                # adopt to reduce teacher forcing more drastical:
+                self.teacher_forcing_ratio = self.teacher_forcing_ratio - (self.teacher_forcing_ratio / 10)
+                if self.teacher_forcing_ratio < 0:
+                    self.teacher_forcing_ratio = 0.0
+                k +=1
+
+            # Sigmoid decreasing schedule
+            # Starts near 1, smoothly decays to near 0
+            # self.teacher_forcing_ratio = 1 / (1 + np.exp((epoch - midpoint) / scale))
+
             # Bacth Loop
             for i, train_data in enumerate(train_dataloader): 
-                # Data
-                # batch data
-                _, cats, nums, eos_paddings, zero_paddings, cats_static, nums_static, _ = train_data
-                # static data (only prefix input data)
-                if use_statics:
-                    static_inputs = self._prepare_static_inputs(cats_static, nums_static)
-                else:
-                    static_inputs = None
-                # dynamic data
+                cats, nums, _ = train_data
+                            
+                # Automize this            
+                
+                            
+                # dim: list(list(Tensors categorical: dim: batch size x window size-4), list(Tensors numerical: dim: batch size x window size-4))
                 prefixes_cat = [cat[:, :-self.suffix_data_split_value].to(self.device) for cat in cats]
                 prefixes_num = [num[:, :-self.suffix_data_split_value].to(self.device) for num in nums]
                 prefixes = [prefixes_cat, prefixes_num]
@@ -194,40 +192,18 @@ class Trainer:
                 suffixes_num = [num[:, -self.suffix_data_split_value:].to(self.device) for num in nums]
                 suffixes = [suffixes_cat, suffixes_num]
                 
-                # zero padding mask tensor
-                prefix_mask = None
-                if use_zero_padd_masking:
-                    # split in prefix direction:
-                    prefix_mask = zero_paddings[:, :-self.suffix_data_split_value].to(self.device)
-                
-                # eos paddings mask tensors
-                eos_paddings_suffix = None
-                if use_eos_padd_masking:
-                    # split in suffix direction:
-                    eos_paddings_suffix = eos_paddings[:, -self.suffix_data_split_value:].to(self.device)
-
-                # Optimization
                 # GradNorm Training:
                 if self.use_gradnorm:
                     # all_losses: list of two dicts, categorical dict and numerical dict: key: feature name, value: tensor loss
                     # loss: Tensor of total loss
-                    all_losses_dict, loss_value = self.train_epoch_gradnorm(prefixes=prefixes,
-                                                                            suffixes=suffixes,
-                                                                            eos_paddings=eos_paddings_suffix,
-                                                                            prefix_mask=prefix_mask,
-                                                                            static_inputs=static_inputs)
+                    all_losses_dict, loss_value = self.train_epoch_gradnorm(prefixes=prefixes, suffixes=suffixes)
                     cat_losses_dict, num_losses_dict = all_losses_dict
                      
                 # Standard Training:    
                 else:
-                    all_losses_dict, loss_value = self.train_epoch(prefixes=prefixes,
-                                                                   suffixes=suffixes,
-                                                                   eos_paddings=eos_paddings_suffix,
-                                                                   prefix_mask=prefix_mask,
-                                                                   static_inputs=static_inputs)
+                    all_losses_dict, loss_value = self.train_epoch(prefixes=prefixes, suffixes=suffixes)
                     cat_losses_dict, num_losses_dict = all_losses_dict
                 
-                # Loss calculation and output
                 # Accumulate the categorical losses
                 for feature_name in cat_losses_dict.keys():  
                     if feature_name in epoch_cat_loss:
@@ -272,12 +248,7 @@ class Trainer:
             train_attenuated_losses.append(epoch_loss_train)
             
             # Validation
-            epoch_cat_loss_val_std, epoch_cat_loss_val_unc,\
-            epoch_num_loss_val_std, epoch_num_loss_val_unc,\
-            epoch_loss_val_std, epoch_loss_val_unc = self.validation_epoch(val_dataloader=val_dataloader,
-                                                                           use_statics=use_statics,
-                                                                           use_zero_padd_masking=use_zero_padd_masking,
-                                                                           use_eos_padd_masking=use_eos_padd_masking)
+            epoch_cat_loss_val_std, epoch_cat_loss_val_unc, epoch_num_loss_val_std, epoch_num_loss_val_unc, epoch_loss_val_std, epoch_loss_val_unc = self.validation_epoch(val_dataloader=val_dataloader)
                         
             tqdm.write(f"Validation: Avg Standard Validation Loss: {epoch_loss_val_std:.4f}")
             tqdm.write(f"Validation: Avg Attenuated Validation Loss: {epoch_loss_val_unc:.4f}")
@@ -288,7 +259,7 @@ class Trainer:
             # Tensorboard writer:
             # Hyperparameters
             self.writer.add_scalars(
-                "Hyperparameter", 
+                "Hyperparameter:", 
                 {
                     'Learning Rate': current_lr,
                     'Teacher Forcing Ratio': self.teacher_forcing_ratio
@@ -307,26 +278,26 @@ class Trainer:
             
             # Categorical losses
             for feature_name in epoch_cat_loss.keys():
-                safe_feature_name = feature_name.replace(':', '_').replace('/', '_')
                 self.writer.add_scalars(
                     "Categorical Feature Losses",
                     {
-                        f'Training {safe_feature_name}': epoch_cat_loss[feature_name],
-                        f'Standard Validation {safe_feature_name}': epoch_cat_loss_val_std[feature_name],
-                        f'Uncertainty Validation {safe_feature_name}': epoch_cat_loss_val_unc[feature_name]
+                        f'Training {feature_name}': epoch_cat_loss[feature_name],
+                        f'Standard Validation {feature_name}': epoch_cat_loss_val_std[feature_name],
+                        f'Uncertainty Validation {feature_name}': epoch_cat_loss_val_unc[feature_name]
                     },
                     epoch + 1)
+                  
             # Numerical losses
             for feature_name in epoch_num_loss.keys():
-                safe_feature_name = feature_name.replace(':', '_').replace('/', '_')
                 self.writer.add_scalars(
                     "Numerical Feature Losses",
                     {
-                        f'Training {safe_feature_name}': epoch_num_loss[feature_name],
-                        f'Standard Validation {safe_feature_name}': epoch_num_loss_val_std[feature_name],
-                        f'Uncertainty Validation {safe_feature_name}': epoch_num_loss_val_unc[feature_name]
+                        f'Training {feature_name}': epoch_num_loss[feature_name],
+                        f'Standard Validation {feature_name}': epoch_num_loss_val_std[feature_name],
+                        f'Uncertainty Validation {feature_name}': epoch_num_loss_val_unc[feature_name]
                     },
                     epoch + 1)
+                
             # GradNorm
             if self.use_gradnorm:
                 # Convert the GradNorm weights and gradient norms to numpy arrays
@@ -334,11 +305,10 @@ class Trainer:
                 
                 feature_losses = list(epoch_cat_loss.keys()) + list(epoch_num_loss.keys())
                 for i, feature_name in enumerate(feature_losses):
-                    safe_feature_name = feature_name.replace(':', '_').replace('/', '_')
                     self.writer.add_scalars(
                         "Gradnorm values", 
                         {
-                            f'Gradnorm Weight {safe_feature_name}': write_weights[i]
+                            f'Gradnorm Weight {feature_name}': write_weights[i]
                         },
                         epoch+1)
             
@@ -358,33 +328,14 @@ class Trainer:
         tqdm.write(f'Model saved to path: {self.saving_path}')
 
         return train_attenuated_losses, val_losses, val_attenuated_losses
-
-    def _prepare_static_inputs(self, cats_static, nums_static):
-        """Prepare optional static tensors for encoder merging."""
-        static_cat = None
-        static_num = None
-
-        if cats_static is not None and cats_static.numel() > 0:
-            static_cat = cats_static.to(self.device)
-        if nums_static is not None and nums_static.numel() > 0:
-            static_num = nums_static.to(self.device)
-
-        # check if empty lists and return None, with this None stop all static steps
-        if static_cat is None and static_num is None:
-            return None
-        
-        return (static_cat, static_num)
     
-    def train_epoch(self, prefixes, suffixes, eos_paddings, prefix_mask=None, static_inputs=None):
+    def train_epoch(self, prefixes, suffixes):
         """
         Train the model on batches.
 
         INPUTS:
         - prefixes: 
-        - suffixes:
-        - eos_paddings: Optional EOS mask tensor matching suffix shape.
-        - prefix_mask: Zero-padding mask for the encoder prefix (batch x seq_len)
-        - static_inputs 
+        - suffixes: 
 
         OUTPUTS:
         - all_losses:
@@ -392,12 +343,7 @@ class Trainer:
         """
         # predictions: List of two Dicts one for categorical (means and vars), one for numerical (means and vars): key: feature name + _mean or _var, value: tensor with dim: seq len x batch size x output feature size
         # data_features_indeces_dec: List of two Dicts one for categorical, one for numerical: key: feature name, value: index of tensor in data list
-        predictions, _, _, data_features_indeces_dec= self.model(prefixes=prefixes,
-                                                                 suffixes=suffixes,
-                                                                 teacher_forcing_ratio=self.teacher_forcing_ratio,
-                                                                 static_inputs=static_inputs,
-                                                                 # prefix mask for the encoder
-                                                                 prefix_mask=prefix_mask)
+        predictions, _, _, data_features_indeces_dec= self.model(prefixes=prefixes, suffixes=suffixes, teacher_forcing_ratio=self.teacher_forcing_ratio)
         
         # Get cat and num predictions
         predictions_cat, predictions_num = predictions
@@ -430,13 +376,9 @@ class Trainer:
                 mean_cat_pred = predictions_cat[key] # dim: seq len x batch size x number classes
                 var_cat_pred = predictions_cat.get(f'{feature_name}_var') # dim: seq len x batch size x number classes
                 target_cat = cat_suffixes_dict[feature_name] # dim: batch size x seq len
-                
                 # Loss caluclation
-                loss_cat = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred,
-                                                                        pred_logvars=var_cat_pred,
-                                                                        T=30, targets=target_cat.long(),
-                                                                        # EOS padd masking
-                                                                        eos_paddings=eos_paddings)
+                loss_cat = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred, pred_logvars=var_cat_pred, T=30, targets=target_cat.long())
+                
                 if (feature_name in cat_loss_dict):
                     raise ValueError("Feature is already in output dict")
                 
@@ -458,10 +400,7 @@ class Trainer:
                 target_num = num_suffixes_dict[feature_name] # dim: batch size x seq len
 
                 # Normal loss:
-                loss_num = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred,
-                                                              pred_logvars=var_num_pred,
-                                                              targets=target_num,
-                                                              eos_paddings=eos_paddings)
+                loss_num = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred, pred_logvars=var_num_pred, targets=target_num)
                                 
                 if (feature_name in num_loss_dict):
                     raise ValueError("Feature is already in output dict")
@@ -494,27 +433,20 @@ class Trainer:
         
         return all_losses, loss
 
-    def train_epoch_gradnorm(self, prefixes, suffixes, eos_paddings=None, prefix_mask=None, static_inputs=None):
+    def train_epoch_gradnorm(self, prefixes, suffixes):
         """
         Train the model on batches and weight MTL lossses using GradNorm.
 
         INPUTS:
         - prefixes: list(categorical list(tensors: batch_size x window_size - suffix_size), numerical list(tensors: batch_size x window_size - suffix_size))
         - suffixes:  list(categorical list(tensors: batch_size x suffix_size - end), numerical list(tensors: batch_size x suffix_size - end))
-        - eos_paddings: 
-        - prefix_mask:
-        - static_inputs:
 
         OUTPUTS:
         - weighted_loss: weighted GradNorm loss 
         - loss: Total loss: weighted_loss + regularizations
         """
         # Predictions  
-        predictions, (h,_), _, data_features_indeces_dec= self.model(prefixes=prefixes,
-                                                                     static_inputs=static_inputs,
-                                                                     suffixes=suffixes,
-                                                                     teacher_forcing_ratio=self.teacher_forcing_ratio,
-                                                                     prefix_mask=prefix_mask)
+        predictions, (h,_), _, data_features_indeces_dec= self.model(prefixes=prefixes, suffixes=suffixes, teacher_forcing_ratio=self.teacher_forcing_ratio)
         
         predictions_cat, predictions_num = predictions
         
@@ -545,11 +477,7 @@ class Trainer:
                 target_cat = cat_suffixes_dict[feature_name] # dim: batch size x seq len
 
                 # Loss caluclation
-                loss_cat = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred,
-                                                                        pred_logvars=var_cat_pred,
-                                                                        T=30,
-                                                                        targets=target_cat.long(),
-                                                                        eos_paddings=eos_paddings)
+                loss_cat = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred, pred_logvars=var_cat_pred, T=30, targets=target_cat.long())
 
                 if (feature_name in cat_loss_dict):
                     raise ValueError("Feature is already in output dict")
@@ -572,10 +500,7 @@ class Trainer:
                 target_num = num_suffixes_dict[feature_name] # dim: batch size x seq len
 
                 # Normal loss:
-                loss_num = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred,
-                                                              pred_logvars=var_num_pred,
-                                                              targets=target_num,
-                                                              eos_paddings=eos_paddings)
+                loss_num = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred, pred_logvars=var_num_pred, targets=target_num)
                 # print("normal loss")
                                 
                 if (feature_name in num_loss_dict):
@@ -603,45 +528,17 @@ class Trainer:
         weight_reg = weight_reg_enc + weight_reg_dec
         bias_reg = bias_reg_enc + bias_reg_dec
 
-        weighted_loss = self.gn_weights * gn_seq_loss
+        # Ensure that the GradNorm weights are on the correct device
+        weighted_loss = self.gn_weights.to(self.device) * gn_seq_loss
         loss = weighted_loss.sum() + self.regularization_term * (weight_reg.to(self.device) + bias_reg.to(self.device))
 
         # Compute gradients for model parameters
         loss.backward(retain_graph=True)
 
-        # Weight updating using GradNorm: Identify the last shared layer weights (Decoder LSTM)
-        # if len(self.model.decoder.hidden_layers) > 0:
-        #    last_shared_layer = self.model.decoder.hidden_layers[-1]
-        #else:
-        #    last_shared_layer = self.model.decoder.first_layer
-        #    
-        #shared_parameters = list(last_shared_layer.parameters())
-
-        #gw = []
-        #for i, gn_loss in enumerate(gn_seq_loss):
-        #    # Gradient of weighted loss w.r.t shared weights
-        #    dl_dw = torch.autograd.grad(self.gn_weights[i] * gn_loss, shared_parameters, retain_graph=True, create_graph=True)
-        #    # L2 norm of all gradients concatenated
-        #    gw.append(torch.norm(torch.cat([g.view(-1) for g in dl_dw])))
-        
-        # According to chat gpt this is not GradNorm, it is more: Representation Gradient Balancing, Saliency-based task weighting, Jacobian regularization
-        
-        # Weight updating using GradNorm    old               
-        # gw = [torch.norm(torch.autograd.grad((self.gn_weights[i] * gn_loss), h, retain_graph=True, create_graph=True)[0]) for i, gn_loss in enumerate(gn_seq_loss)]
-        # gw_all = torch.stack(gw)
-        
-        # RepNorm: Representation Gradient Balancing, otherwise: Average gradients across dropout samples:
-        gw = []
-        for i, loss_i in enumerate(gn_seq_loss):
-            grad_h = torch.autograd.grad(self.gn_weights[i] * loss_i,
-                                         h, #.detach().requires_grad(True),
-                                         retain_graph=True,
-                                         create_graph=True)[0]
-            gw.append(torch.norm(grad_h))
-        
+        # Weight updating using GradNorm                   
+        gw = [torch.norm(torch.autograd.grad((self.gn_weights[i] * gn_loss), h, retain_graph=True, create_graph=True)[0]) for i, gn_loss in enumerate(gn_seq_loss)]
         gw_all = torch.stack(gw)
-        
-        
+
         # Compute the average gradient norm
         gw_all_avg = gw_all.mean().detach()
         # Compute loss ratio per task
@@ -672,7 +569,7 @@ class Trainer:
         
         return all_losses, loss
 
-    def validation_epoch(self, val_dataloader, use_statics=False, use_zero_padd_masking=False, use_eos_padd_masking=False):
+    def validation_epoch(self, val_dataloader):
         """
         Validates the model on the validation set during training.
 
@@ -701,44 +598,20 @@ class Trainer:
             num_batches_per_epoch = 0.0
             
             for _, val_data in enumerate(val_dataloader): 
-                _, cats, nums, eos_paddings, zero_paddings, cats_static, nums_static, _ = val_data
-
-                if use_statics:
-                    static_inputs = self._prepare_static_inputs(cats_static, nums_static)
-                else:
-                    static_inputs = None
                 
+                cats, nums, _ = val_data    
+                
+                # dim: list(list(Tensors categorical: dim: batch size x window size-4), list(Tensors numerical: dim: batch size x window size-4))
                 prefixes_cat = [cat[:, :-self.suffix_data_split_value].to(self.device) for cat in cats]
                 prefixes_num = [num[:, :-self.suffix_data_split_value].to(self.device) for num in nums]
                 prefixes = [prefixes_cat, prefixes_num]
-                
-                if use_zero_padd_masking:
-                    prefix_mask = zero_paddings[:, :-self.suffix_data_split_value].to(self.device)
-                else:
-                    prefix_mask = None
                     
                 suffixes_cat = [cat[:, -self.suffix_data_split_value:].to(self.device) for cat in cats]
                 suffixes_num = [num[:, -self.suffix_data_split_value:].to(self.device) for num in nums]
                 suffixes = [suffixes_cat, suffixes_num]
 
-                eos_paddings_suffix = None
-                if use_eos_padd_masking:
-                    eos_paddings_suffix = eos_paddings[:, -self.suffix_data_split_value:].to(self.device)
-
-                if use_zero_padd_masking:
-                    suffix_zero_mask = zero_paddings[:, -self.suffix_data_split_value:].to(self.device)
-                    if eos_paddings_suffix is not None:
-                        # Intersection: Mask out BOTH left-padding AND post-EOS
-                        eos_paddings_suffix = eos_paddings_suffix * suffix_zero_mask
-                    else:
-                        eos_paddings_suffix = suffix_zero_mask
-
                 # Model predictions:
-                predictions, _, _, data_features_indeces_dec= self.model(prefixes=prefixes,
-                                                                         suffixes=suffixes,
-                                                                         teacher_forcing_ratio=self.teacher_forcing_ratio,
-                                                                         static_inputs=static_inputs,
-                                                                         prefix_mask=prefix_mask)
+                predictions, _, _, data_features_indeces_dec= self.model(prefixes=prefixes, suffixes=suffixes, teacher_forcing_ratio=self.teacher_forcing_ratio)
                 predictions_cat, predictions_num = predictions
                 
                 # Targets
@@ -767,15 +640,9 @@ class Trainer:
 
                         # Loss caluclation
                         # Standard cross entropy
-                        cat_loss_std = self.loss_obj.standard_cross_entropy(pred_logits=mean_cat_pred,
-                                                                            targets=target_cat.long(),
-                                                                            eos_paddings=eos_paddings_suffix)
+                        cat_loss_std = self.loss_obj.standard_cross_entropy(pred_logits=mean_cat_pred, targets=target_cat.long())
                         # Uncertainty cross entropy
-                        cat_loss_unc = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred,
-                                                                                    pred_logvars=var_cat_pred,
-                                                                                    T=30,
-                                                                                    targets=target_cat.long(),
-                                                                                        eos_paddings=eos_paddings_suffix)
+                        cat_loss_unc = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred, pred_logvars=var_cat_pred, T=30, targets=target_cat.long())
 
                         if feature_name in cat_loss_dict_std:
                             # Add the current batch's loss to the cumulative loss
@@ -798,14 +665,9 @@ class Trainer:
 
                         # Loss caluclation
                         # Standard mean squared error
-                        num_loss_std = self.loss_obj.standard_mse(preds=mean_num_pred,
-                                                                  targets=target_num,
-                                                                  eos_paddings=eos_paddings_suffix)
+                        num_loss_std = self.loss_obj.standard_mse(preds=mean_num_pred, targets=target_num)
                         # Normal loss:
-                        num_loss_unc = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred,
-                                                                          pred_logvars=var_num_pred,
-                                                                          targets=target_num,
-                                                                          eos_paddings=eos_paddings_suffix)
+                        num_loss_unc = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred, pred_logvars=var_num_pred, targets=target_num)
                         
                         if feature_name in num_loss_dict_std:
                             # Add the current batch's loss to the cumulative loss
