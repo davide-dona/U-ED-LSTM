@@ -8,7 +8,6 @@ Uses gradient normalization (GradNorm) technique to balance task losses dynamica
 import torch
 from torch.utils.data import DataLoader
 from tqdm.notebook import tqdm
-import numpy as np
 
 class Trainer:
     def __init__(self,
@@ -17,39 +16,39 @@ class Trainer:
                  data_train,
                  data_val,
                  loss_obj,
-                 log_normal_loss_num_feature,
                  optimize_values,
                  suffix_data_split_value,
                  writer,
-                 save_model_n_th_epoch: int = 0,
+                 gradnorm_values,
                  saving_path: str = 'model.pkl',
-                 gradnorm_values=None):
+                 early_stopping_patience: int = None):
         """
         Trainer class constructor.
-        
+
         ARGS:
         - device: Device (GPU or CPU).
         - model: Model that is trained and validated.
         - data_train: Training data.
         - data_val: Validation data.
         - loss_obj: object for loss functions
-        - log_normal_loss_num_feature: list of strings of num feaures that follow log normal distribution.
         - optimize_values:
-            - regularization_term: L2 regularization for weights, biases, and dropout of stochastic model. 
+            - regularization_term: L2 regularization for weights, biases, and dropout of stochastic model.
             - optimizer: Optimization algorithm for training.
             - epochs: Epochs the model trains the full training dataset.
             - mini_batches: Batches the model get passed at once.
             - shuffles: Shuffle batches.
             - teacher_forcing_ratio: Value [0,1) that is used to decide if predicted or next target event is used for next prediction by model.
-            - gradnorm: 
-        
-        - suffix_data_split_value: Number of last values of suffix events. 
+            - gradnorm:
+
+        - suffix_data_split_value: Number of last values of suffix events.
         - writer
-        - save_model_n_th_epoch: int,
-        - saving_path: str, default: 'model.pkl'
-        
+        - saving_path: str, default: 'model.pkl'. The model is saved here every time the standard
+          validation loss improves on its best value so far, i.e. this always ends up holding the
+          best model seen during training rather than the last one.
+        - early_stopping_patience: int, optional. Stop training after this many consecutive epochs
+          without a validation loss improvement. None (default) disables early stopping.
+
         - gradnorm_values:
-            - use_gradnorm: Boolean value if gradnorm should be used or not.
             - gn_alpha": Hyperparameter for GradNorm.
             - gn_learning_rate: Task balancing weights leraning rate.
             - gn_weights: Weights for losse: Initial None.
@@ -70,9 +69,7 @@ class Trainer:
         
         self.loss_obj = loss_obj
         print("Loss object for method calling: ", loss_obj)
-        self.log_normal_loss_num_feature = log_normal_loss_num_feature
-        print("Num. feautures that follow log-normal PDF: ", log_normal_loss_num_feature)
-        
+
         # Standard Optimization parameters
         self.optimize_values = optimize_values
         self.regularization_term = optimize_values["regularization_term"]
@@ -91,39 +88,37 @@ class Trainer:
         # Teacher forcing
         self.teacher_forcing_ratio = optimize_values["teacher_forcing_ratio"]
         print("Teacher forcing ratio: ", self.teacher_forcing_ratio)
-        self.teacher_forcing_init = float(self.teacher_forcing_ratio)  # e.g. 1.0
-        
+
         # Events in sufffix: Dependent on data set
         self.suffix_data_split_value = suffix_data_split_value
         
         # TensorBoard
         self.writer = writer
         
-        # Model saving
-        self.save_model_n_th_epoch = save_model_n_th_epoch
+        # Model saving: always keep the best model seen so far on validation loss.
         self.saving_path = saving_path
+        self.best_val_loss = float('inf')
+
+        # Early stopping
+        self.early_stopping_patience = early_stopping_patience
+        self.epochs_without_improvement = 0
 
         # Gradnorm parameters
         self.gradnorm_values = gradnorm_values
-        if gradnorm_values is not None:
-            self.use_gradnorm = gradnorm_values["use_gradnorm"]
-            print("Use GradNorm: ", self.use_gradnorm)
-            
-            if self.use_gradnorm:
-                self.gn_alpha = gradnorm_values["gn_alpha"]
-                print("GradNorm alpha: ", self.gn_alpha)
-                self.gn_learning_rate = gradnorm_values["gn_learning_rate"]
-                print("GradNorm learning rate: ", self.gn_learning_rate)
-                self.number_tasks = gradnorm_values["number_tasks"]
-                
-                self.gn_weights = torch.nn.Parameter(torch.ones(self.number_tasks, dtype=torch.float))
-                print("Initial GradNorm loss weights: ",self.gn_weights)
-                self.l0 = None
-                print("Initial loss values: ", self.l0)
-                
-                # Use same optimizer as for the model optimization
-                self.gn_optimizer = torch.optim.AdamW(params=[self.gn_weights], lr=self.gn_learning_rate)
-                print("GradNorm optimizer: ", self.gn_optimizer)
+        self.gn_alpha = gradnorm_values["gn_alpha"]
+        print("GradNorm alpha: ", self.gn_alpha)
+        self.gn_learning_rate = gradnorm_values["gn_learning_rate"]
+        print("GradNorm learning rate: ", self.gn_learning_rate)
+        self.number_tasks = gradnorm_values["number_tasks"]
+
+        self.gn_weights = torch.nn.Parameter(torch.ones(self.number_tasks, dtype=torch.float))
+        print("Initial GradNorm loss weights: ",self.gn_weights)
+        self.l0 = None
+        print("Initial loss values: ", self.l0)
+
+        # Use same optimizer as for the model optimization
+        self.gn_optimizer = torch.optim.AdamW(params=[self.gn_weights], lr=self.gn_learning_rate)
+        print("GradNorm optimizer: ", self.gn_optimizer)
     
     def train_model(self):
         """
@@ -148,10 +143,6 @@ class Trainer:
         # Teacher forcing reducing index:
         k = 1
 
-        # choose sigmoid teacher forcing hyperparams (tweak to taste)
-        midpoint = 0.5 * self.epochs          # default: halfway through training
-        scale = 0.1 * self.epochs             # default: transition width (10% of total epochs)
-        
         # Trainings/ Epoch Loop
         for epoch in tqdm(range(self.epochs)):
             
@@ -172,17 +163,10 @@ class Trainer:
                     self.teacher_forcing_ratio = 0.0
                 k +=1
 
-            # Sigmoid decreasing schedule
-            # Starts near 1, smoothly decays to near 0
-            # self.teacher_forcing_ratio = 1 / (1 + np.exp((epoch - midpoint) / scale))
-
             # Bacth Loop
-            for i, train_data in enumerate(train_dataloader): 
+            for i, train_data in enumerate(train_dataloader):
                 cats, nums, _ = train_data
-                            
-                # Automize this            
-                
-                            
+
                 # dim: list(list(Tensors categorical: dim: batch size x window size-4), list(Tensors numerical: dim: batch size x window size-4))
                 prefixes_cat = [cat[:, :-self.suffix_data_split_value].to(self.device) for cat in cats]
                 prefixes_num = [num[:, :-self.suffix_data_split_value].to(self.device) for num in nums]
@@ -193,17 +177,12 @@ class Trainer:
                 suffixes = [suffixes_cat, suffixes_num]
                 
                 # GradNorm Training:
-                if self.use_gradnorm:
-                    # all_losses: list of two dicts, categorical dict and numerical dict: key: feature name, value: tensor loss
-                    # loss: Tensor of total loss
-                    all_losses_dict, loss_value = self.train_epoch_gradnorm(prefixes=prefixes, suffixes=suffixes)
-                    cat_losses_dict, num_losses_dict = all_losses_dict
-                     
-                # Standard Training:    
-                else:
-                    all_losses_dict, loss_value = self.train_epoch(prefixes=prefixes, suffixes=suffixes)
-                    cat_losses_dict, num_losses_dict = all_losses_dict
-                
+                # all_losses: list of two dicts, categorical dict and numerical dict: key: feature name, value: tensor loss
+                # loss: Tensor of total loss
+                all_losses_dict, loss_value = self.train_epoch_gradnorm(prefixes=prefixes, suffixes=suffixes)
+                cat_losses_dict, num_losses_dict = all_losses_dict
+
+
                 # Accumulate the categorical losses
                 for feature_name in cat_losses_dict.keys():  
                     if feature_name in epoch_cat_loss:
@@ -299,18 +278,17 @@ class Trainer:
                     epoch + 1)
                 
             # GradNorm
-            if self.use_gradnorm:
-                # Convert the GradNorm weights and gradient norms to numpy arrays
-                write_weights = self.gn_weights.data.cpu().numpy()
-                
-                feature_losses = list(epoch_cat_loss.keys()) + list(epoch_num_loss.keys())
-                for i, feature_name in enumerate(feature_losses):
-                    self.writer.add_scalars(
-                        "Gradnorm values", 
-                        {
-                            f'Gradnorm Weight {feature_name}': write_weights[i]
-                        },
-                        epoch+1)
+            # Convert the GradNorm weights and gradient norms to numpy arrays
+            write_weights = self.gn_weights.data.cpu().numpy()
+
+            feature_losses = list(epoch_cat_loss.keys()) + list(epoch_num_loss.keys())
+            for i, feature_name in enumerate(feature_losses):
+                self.writer.add_scalars(
+                    "Gradnorm values",
+                    {
+                        f'Gradnorm Weight {feature_name}': write_weights[i]
+                    },
+                    epoch+1)
             
             # Adjust the learning rate if necessary
             tqdm.write(f"Validation Loss for Scheduler: {epoch_loss_val_std:.4f}")
@@ -318,121 +296,25 @@ class Trainer:
             # Adjust learning rate
             self.scheduler.step(epoch_loss_val_std)
 
-            if (i+1) % self.save_model_n_th_epoch == 0:
-                 tqdm.write("saving model")
-                 self.model.save(self.saving_path)
-                                 
-        print("Training complete.")
+            # Best model saving: only overwrite the checkpoint when validation loss improves.
+            if epoch_loss_val_std < self.best_val_loss:
+                self.best_val_loss = epoch_loss_val_std
+                self.epochs_without_improvement = 0
+                tqdm.write(f"Validation loss improved to {epoch_loss_val_std:.4f}, saving model")
+                self.model.save(self.saving_path)
+            else:
+                self.epochs_without_improvement += 1
+                if (self.early_stopping_patience is not None
+                        and self.epochs_without_improvement >= self.early_stopping_patience):
+                    tqdm.write(f"No validation improvement for {self.epochs_without_improvement} "
+                               f"epochs, stopping early")
+                    break
 
-        self.model.save(self.saving_path)
-        tqdm.write(f'Model saved to path: {self.saving_path}')
+        print("Training complete.")
+        tqdm.write(f'Best model (val loss {self.best_val_loss:.4f}) saved to path: {self.saving_path}')
 
         return train_attenuated_losses, val_losses, val_attenuated_losses
     
-    def train_epoch(self, prefixes, suffixes):
-        """
-        Train the model on batches.
-
-        INPUTS:
-        - prefixes: 
-        - suffixes: 
-
-        OUTPUTS:
-        - all_losses:
-        - loss: 
-        """
-        # predictions: List of two Dicts one for categorical (means and vars), one for numerical (means and vars): key: feature name + _mean or _var, value: tensor with dim: seq len x batch size x output feature size
-        # data_features_indeces_dec: List of two Dicts one for categorical, one for numerical: key: feature name, value: index of tensor in data list
-        predictions, _, _, data_features_indeces_dec= self.model(prefixes=prefixes, suffixes=suffixes, teacher_forcing_ratio=self.teacher_forcing_ratio)
-        
-        # Get cat and num predictions
-        predictions_cat, predictions_num = predictions
-        
-        # cat, num feature index dict
-        cat_features_indeces, num_features_indeces = data_features_indeces_dec
-        
-        # Get cat and num targets
-        cat_suffixes, num_suffixes = suffixes
-        
-        cat_suffixes_dict = {}
-        # For suffix: map the feature name of the decoder output to the corresponding tensor using the index
-        for feature_name, index in cat_features_indeces.items():
-            cat_suffixes_dict[feature_name] = cat_suffixes[index]
-            
-        num_suffixes_dict = {}    
-        for feature_name, index in num_features_indeces.items():
-            num_suffixes_dict[feature_name] = num_suffixes[index]        
-        
-        # Calculate the loss for all categorical features
-        cat_loss_dict = {}
-        cat_loss_list = []
-        # Iterate over the dictionary and group by feature name without suffix
-        for key in predictions_cat:
-            if key.endswith('_mean'):
-                # Get the base name of the feature (removing the '_mean' suffix)
-                feature_name = key[:-5]
-
-                # Get the corresponding mean and variance tensors from the prediction
-                mean_cat_pred = predictions_cat[key] # dim: seq len x batch size x number classes
-                var_cat_pred = predictions_cat.get(f'{feature_name}_var') # dim: seq len x batch size x number classes
-                target_cat = cat_suffixes_dict[feature_name] # dim: batch size x seq len
-                # Loss caluclation
-                loss_cat = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred, pred_logvars=var_cat_pred, T=30, targets=target_cat.long())
-                
-                if (feature_name in cat_loss_dict):
-                    raise ValueError("Feature is already in output dict")
-                
-                cat_loss_dict[feature_name] = loss_cat
-                cat_loss_list.append(loss_cat)
-        
-        # Calculate the loss for all numerical features
-        num_loss_dict = {}
-        num_loss_list = []
-        # Iterate over the dictionary and group by feature name without suffix
-        for key in predictions_num:
-            if key.endswith('_mean'):
-                # Get the base name of the feature (removing the '_mean' suffix)
-                feature_name = key[:-5]
-                            
-                # Get the corresponding mean and variance tensors from the prediction
-                mean_num_pred = predictions_num[key] # dim: seq len x batch size x number classes
-                var_num_pred = predictions_num.get(f'{feature_name}_var') # dim: seq len x batch size x 1
-                target_num = num_suffixes_dict[feature_name] # dim: batch size x seq len
-
-                # Normal loss:
-                loss_num = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred, pred_logvars=var_num_pred, targets=target_num)
-                                
-                if (feature_name in num_loss_dict):
-                    raise ValueError("Feature is already in output dict")
-
-                num_loss_dict[feature_name] = loss_num
-        
-        # List of dictionary of categorical and numerical losses for 1 batch
-        all_losses = [cat_loss_dict, num_loss_dict]
-        
-        weight_reg_enc, bias_reg_enc = self.model.encoder.regularizer()
-        weight_reg_dec, bias_reg_dec = self.model.decoder.regularizer()
-        
-        weight_reg = weight_reg_enc + weight_reg_dec
-        bias_reg = bias_reg_enc + bias_reg_dec
-
-        # Zero gradients before optimization step
-        self.optimizer.zero_grad()
-
-        # Total mean loss
-        stacked_tensor_losses = torch.stack((cat_loss_list + num_loss_list))
-        data_loss = stacked_tensor_losses.sum()
-        loss = data_loss + self.regularization_term * (weight_reg.to(self.device) + bias_reg.to(self.device))
-        loss.backward()
-        
-        # Gradient clipping to avoid exploding gradients
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    
-        # Model Optimization
-        self.optimizer.step()
-        
-        return all_losses, loss
-
     def train_epoch_gradnorm(self, prefixes, suffixes):
         """
         Train the model on batches and weight MTL lossses using GradNorm.

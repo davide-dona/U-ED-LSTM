@@ -231,3 +231,6 @@ src/notebooks/training_variational_dropout_v2/**/*_decision_v2.pkl
 
 # End of https://www.toptal.com/developers/gitignore/api/visualstudiocode,python,jupyternotebooks
 
+
+# Checkpoints written by scripts/train.py
+checkpoints/

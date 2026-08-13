@@ -1,0 +1,22 @@
+[project]
+name = "u-ed-lstm"
+version = "0.1.0"
+description = "U-ED-LSTM baseline, kept for retraining and comparison against the probabilistic suffix prediction CVAE."
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel",
+    "jupyter",
+    "notebook",
+    "pandas",
+    "numpy",
+    "torch",
+    "scikit-learn",
+    "standard-imghdr",
+    "tensorboard",
+    "tqdm",
+]
+
+[dependency-groups]
+dev = [
+    "torch-tb-profiler",
+]

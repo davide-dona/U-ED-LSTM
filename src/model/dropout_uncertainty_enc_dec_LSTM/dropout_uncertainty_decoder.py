@@ -177,14 +177,6 @@ class DropoutUncertaintyLSTMDecoder(nn.Module):
             pred_var = self.output_layers[f"{key}_var"](final_output)
             prediction_vars[1][f"{key}_var"] = pred_var
 
-            # Get raw log-variance prediction
-            # raw_logvar = self.output_layers[f"{key}_var"](final_output)
-            # LOGVAR_BOUND: 3.0 -> var = [exp(-3.0)=0.05, exp(3.0)=20]
-            # LOGVAR_BOUND = 6.0
-            # Bound the log-variance using tanh activation
-            # bounded_logvar = LOGVAR_BOUND * torch.tanh(raw_logvar / LOGVAR_BOUND)
-            # prediction_vars[1][f"{key}_var"] = bounded_logvar  # Store the safe version
-            
         predictions = [prediction_means, prediction_vars]
 
         # Return the prediction dictionaries for means and variances along with the hidden states

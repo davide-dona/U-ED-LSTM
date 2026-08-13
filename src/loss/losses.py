@@ -1,11 +1,3 @@
-"""
-Loss functions incorporating combined epistemic and aleatoric uncertainty estimations.
-
-Based on:
-- Kendall, Alex, and Yarin Gal. "What uncertainties do we need in bayesian deep learning for computer vision?." Advances in neural information processing systems 30 (2017).
-- Weytjens, Hans, and Jochen De Weerdt. "Learning uncertainty with artificial neural networks for predictive process monitoring." Applied Soft Computing 125 (2022).
-"""
-
 import torch
 
 class Loss:
@@ -64,43 +56,6 @@ class Loss:
         inv_variances = torch.exp(-pred_logvars)
         
         L = torch.sum(0.5 * (inv_variances * ((targets - pred_means) ** 2) + pred_logvars), dim=2)
-        # Mean over events in sequence
-        L = torch.mean(L, dim=1)
-        # Mean over batches
-        L = torch.mean(L)
-
-        return L
-    
-    def loss_attenuation_mse_log_normal(self, pred_means, pred_logvars, log_targets):
-        """
-        Loss attenuation MSE: Combined Epistemic and Aleatoric Uncertainty of an assumed Log normal probability density function for our time input.
-    
-        INPUTS:
-        - pred_logmeans: Predicted log time values for N events: dim: seq len x batch x output values (1)
-        - pred_logvars: Predicted log variance values for predicted mean for N events: dim: seq len x batch x output values (1)
-        - targets: Target (time) values for N events: dim: batch x sequence length
-        
-        OUTPUTS:
-        - L: Global Loss value for numerical values of events of different batches: Tensor (float)
-        """
-        
-        # Clamp the predicted variance to avoid extreme values
-        min_logvariance = (torch.tensor(-6).to(pred_logvars.device))
-        max_logvariance = (torch.tensor(6).to(pred_logvars.device))
-        pred_logvars = torch.clamp(pred_logvars, min=min_logvariance, max=max_logvariance)
-                
-        # Bring into structure: batch x seq len x output features (1)
-        pred_means = pred_means.permute(1,0,2) # t := log(x)
-        pred_logvars = pred_logvars.permute(1,0,2) # s := log(sigma^2)
-        
-        # Stable inverse variance: exp(-log(var)) = 1/sig^2 (1/var)
-        inv_variances = torch.exp(-pred_logvars)
-        
-        # log the observed targets according to NLL log-normal PDF
-        log_targets = log_targets.unsqueeze(2)
-        
-        L = torch.sum(log_targets + 0.5 * (pred_logvars + (inv_variances * (log_targets - pred_means)**2)), dim=2)
-                
         # Mean over events in sequence
         L = torch.mean(L, dim=1)
         # Mean over batches
