@@ -198,9 +198,6 @@ pyrightconfig.json
 # Local History for Visual Studio Code
 .history/
 
-### Project data (generated/large) ###
-**/encoded_data_v2/
-
 # Built Visual Studio Code Extensions
 *.vsix
 
@@ -209,28 +206,16 @@ pyrightconfig.json
 .history
 .ionide
 
-# .pkl in reimplemented approaches
-src/reimplemented_comparable_approaches/**/notebooks/evaluation/**/*.pkl
-
-data_information
-
-encoded_data/*
-
-encoded_data_v2/*
-
-encoded_data_v2_test/*
-
-encoded_data_conformal_v2/*
-
-# encoded_data_conformance_v2/*
-
-encoded_data_decision_v2/*
-
-# models
-src/notebooks/training_variational_dropout_v2/**/*_decision_v2.pkl
-
 # End of https://www.toptal.com/developers/gitignore/api/visualstudiocode,python,jupyternotebooks
 
 
+### Project data (generated/large) ###
+
+# Encoded splits written by scripts/build_datasets.py
+encoded_data/*
+
 # Checkpoints written by scripts/train.py
 checkpoints/
+
+# Generations written by scripts/generate.py
+outputs/

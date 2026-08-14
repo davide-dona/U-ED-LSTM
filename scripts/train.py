@@ -23,6 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 sys.path.insert(0, ROOT)
 
+from configs.data import ENCODED_DIR, MIN_SUFFIX_SIZE, encoded_stem  # noqa: E402
 from configs.training import DATASETS  # noqa: E402
 from loss.losses import Loss  # noqa: E402
 from model.dropout_uncertainty_enc_dec_LSTM.dropout_uncertainty_model import (  # noqa: E402
@@ -71,9 +72,9 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--dataset', required=True, choices=sorted(DATASETS),
                         help='Which encoded dataset to train on.')
-    parser.add_argument('--encoded-dir', default='encoded_data',
+    parser.add_argument('--encoded-dir', default=ENCODED_DIR,
                         help='Where `build_datasets.py` wrote the datasets.')
-    parser.add_argument('--min-suffix-size', type=int, default=5,
+    parser.add_argument('--min-suffix-size', type=int, default=MIN_SUFFIX_SIZE,
                         help='The value the datasets were built with; part of their file names.')
     parser.add_argument('--out', default=None,
                         help='Checkpoint path. Defaults to checkpoints/<dataset>_u_ed_lstm.pkl.')
@@ -90,7 +91,7 @@ def main():
 
     config = DATASETS[args.dataset]
 
-    stem = os.path.join(args.encoded_dir, f'{args.dataset}_all_{args.min_suffix_size}')
+    stem = encoded_stem(args.encoded_dir, args.dataset, args.min_suffix_size)
     data_train = torch.load(f'{stem}_train.pkl', weights_only=False)
     data_val = torch.load(f'{stem}_val.pkl', weights_only=False)
     print(f"Train windows: {len(data_train)}, validation windows: {len(data_val)}")
@@ -100,10 +101,12 @@ def main():
     print("Input features encoder: ", enc_feat)
     print("Features decoder: ", dec_feat)
 
+    # Both numbers come from `configs/data.py`, so they can only differ if the dataset on disk
+    # predates a change to it.
     assert data_train.spec.suffix_data_split_value == config['seq_len_pred'], \
         (f"The dataset was built with a target of {data_train.spec.suffix_data_split_value} events "
          f"but the model predicts {config['seq_len_pred']}. Rebuild it with "
-         f"--suffix-split {config['seq_len_pred']}.")
+         f"scripts/build_datasets.py.")
 
     model = DropoutUncertaintyEncoderDecoderLSTM(data_set_categories=data_train.all_categories,
                                                  enc_feat=enc_feat,

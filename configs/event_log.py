@@ -1,6 +1,6 @@
 """
 Constants for the event log schema written by the `probabilistic-suffix-prediction` preprocessing
-pipeline: the `train.csv` / `val.csv` / `test.csv` files `presplit_loader.py` reads.
+pipeline: the `train.csv` / `val.csv` / `test.csv` files `event_log_loader/reader.py` reads.
 """
 
 # Canonical column names written by the external preprocessing pipeline.
@@ -21,5 +21,10 @@ REMAINING_TIME_COLUMN = 'rtime'
 # Value written into every categorical column of the end-of-sequence events, as in
 # `CSV2EventLog._CSV2EventLog__add_last_rows`.
 EOS_LABEL = 'EOS'
+
+# What a categorical value the codec's vocabulary does not hold is encoded as, and read back as.
+# Spelled the way the preprocessing pipeline spells it, so an unknown value compares equal across
+# models.
+UNKNOWN_LABEL = 'UNK'
 
 SPLITS = ('train', 'val', 'test')

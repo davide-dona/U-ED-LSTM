@@ -2,11 +2,16 @@
 Per-dataset model and training hyperparameters, retrieved from the original repository.
 BPIC19 was not included in the original repository, added for completeness and matching the other BPIC datasets.
 """
+
+from configs.data import DATASETS as DATASET_NAMES
+from configs.data import SEQ_LEN_PRED
+
 # Shared by every dataset upstream, on all of Helpdesk, Sepsis and BPIC17.
 COMMON = {
     # Decoder output sequence length. The trainer takes the same number of trailing window
-    # positions as the target, so `seq_len_pred` and `suffix_data_split_value` move together.
-    'seq_len_pred': 4,
+    # positions as the target, so this is the geometry the datasets were cut with, not a free
+    # hyperparameter: it is read from `configs/data.py` rather than repeated here.
+    'seq_len_pred': SEQ_LEN_PRED,
     'hidden_size': 128,
     'num_layers': 4,
     'dropout': 0.1,
@@ -46,3 +51,6 @@ DATASETS = {
         'batch_size': 256,
     },
 }
+
+assert set(DATASETS) == set(DATASET_NAMES), \
+    f"Every dataset needs hyperparameters: {sorted(set(DATASET_NAMES) - set(DATASETS))} missing"

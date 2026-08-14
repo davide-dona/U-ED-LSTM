@@ -9,6 +9,7 @@ dependencies = [
     "notebook",
     "pandas",
     "numpy",
+    "pyarrow",
     "torch",
     "scikit-learn",
     "standard-imghdr",
