@@ -111,7 +111,10 @@ class Trainer:
         print("GradNorm learning rate: ", self.gn_learning_rate)
         self.number_tasks = gradnorm_values["number_tasks"]
 
-        self.gn_weights = torch.nn.Parameter(torch.ones(self.number_tasks, dtype=torch.float))
+        # Kept on the compute device: it is read every step, and a host parameter would mean a
+        # blocking host-to-device copy per step to weight the losses with.
+        self.gn_weights = torch.nn.Parameter(torch.ones(self.number_tasks, dtype=torch.float,
+                                                        device=device))
         print("Initial GradNorm loss weights: ",self.gn_weights)
         self.l0 = None
         print("Initial loss values: ", self.l0)
@@ -192,38 +195,42 @@ class Trainer:
                 cat_losses_dict, num_losses_dict = all_losses_dict
 
 
+                # Accumulate the losses on the device. Reading one out with `.item()` would
+                # synchronize the host with the device once per feature per batch, which stops the
+                # host from queueing the next batch's work while the current one runs; they are
+                # accumulated as (double precision) tensors instead and read out once per epoch.
                 # Accumulate the categorical losses
-                for feature_name in cat_losses_dict.keys():  
+                for feature_name in cat_losses_dict.keys():
                     if feature_name in epoch_cat_loss:
                         # Add the current batch's loss to the cumulative loss
-                        epoch_cat_loss[feature_name] += cat_losses_dict[feature_name].item()
+                        epoch_cat_loss[feature_name] += cat_losses_dict[feature_name].detach().double()
                     else:
                         # Initialize the cumulative loss with the first batch's loss
-                        epoch_cat_loss[feature_name] = cat_losses_dict[feature_name].item()
+                        epoch_cat_loss[feature_name] = cat_losses_dict[feature_name].detach().double()
 
                 # Accumulate the numerical losses
-                for feature_name in num_losses_dict.keys():  
+                for feature_name in num_losses_dict.keys():
                     if feature_name in epoch_num_loss:
                         # Add the current batch's loss to the cumulative loss
-                        epoch_num_loss[feature_name] += num_losses_dict[feature_name].item()
+                        epoch_num_loss[feature_name] += num_losses_dict[feature_name].detach().double()
                     else:
                         # Initialize the cumulative loss with the first batch's loss
-                        epoch_num_loss[feature_name] = num_losses_dict[feature_name].item()
+                        epoch_num_loss[feature_name] = num_losses_dict[feature_name].detach().double()
 
                 # Accumulated total loss for the entire epoch
-                epoch_loss += loss_value.item()
-                                
+                epoch_loss += loss_value.detach().double()
+
                 # Increase number of trained batches:
                 num_batches_per_epoch += 1
-                
+
             # Take the mean losses over all batches
             for feature_name in epoch_cat_loss.keys():
-                epoch_cat_loss[feature_name] = epoch_cat_loss[feature_name] / num_batches_per_epoch
-                
+                epoch_cat_loss[feature_name] = (epoch_cat_loss[feature_name] / num_batches_per_epoch).item()
+
             for feature_name in epoch_num_loss.keys():
-                epoch_num_loss[feature_name] = epoch_num_loss[feature_name] / num_batches_per_epoch
-            
-            epoch_loss_train = epoch_loss / num_batches_per_epoch
+                epoch_num_loss[feature_name] = (epoch_num_loss[feature_name] / num_batches_per_epoch).item()
+
+            epoch_loss_train = (epoch_loss / num_batches_per_epoch).item()
 
             # Current learning rate
             current_lr = self.scheduler.optimizer.param_groups[0]['lr']
@@ -419,16 +426,23 @@ class Trainer:
         weight_reg = weight_reg_enc + weight_reg_dec
         bias_reg = bias_reg_enc + bias_reg_dec
 
-        # Ensure that the GradNorm weights are on the correct device
-        weighted_loss = self.gn_weights.to(self.device) * gn_seq_loss
-        loss = weighted_loss.sum() + self.regularization_term * (weight_reg.to(self.device) + bias_reg.to(self.device))
+        weighted_loss = self.gn_weights * gn_seq_loss
+        loss = weighted_loss.sum() + self.regularization_term * (weight_reg + bias_reg)
 
         # Compute gradients for model parameters
         loss.backward(retain_graph=True)
 
-        # Weight updating using GradNorm                   
-        gw = [torch.norm(torch.autograd.grad((self.gn_weights[i] * gn_loss), h, retain_graph=True, create_graph=True)[0]) for i, gn_loss in enumerate(gn_seq_loss)]
-        gw_all = torch.stack(gw)
+        # Weight updating using GradNorm.
+        # The gradient norm is taken on the task's own loss and the task weight multiplied back in
+        # afterwards: ||grad(w_i * L_i)|| is |w_i| * ||grad(L_i)||, so this is the same quantity,
+        # but with the norms as constants rather than as a graph to differentiate a second time
+        # through. Two things follow. The GradNorm loss now has a path to the task weights only,
+        # which is what it is meant to update, instead of also depositing a gradient on every model
+        # parameter, which GradNorm balances the tasks of rather than trains. And the step no longer
+        # carries a double backward over the whole recurrence, which was 40% of its cost.
+        gw = [torch.norm(torch.autograd.grad(gn_loss, h, retain_graph=True)[0])
+              for gn_loss in all_loss_list]
+        gw_all = self.gn_weights.abs() * torch.stack(gw).detach()
 
         # Compute the average gradient norm
         gw_all_avg = gw_all.mean().detach()

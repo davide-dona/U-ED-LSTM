@@ -105,27 +105,33 @@ class Loss:
             
         # Cross Entropy Loss
         CEL = torch.nn.CrossEntropyLoss(reduction='none')
-        
+
         # Get standard deviation
         variance = torch.exp(pred_logvars)
         std = torch.sqrt(variance)
-        
-        L = 0
-        # T monte carlo iterations for approx. gaussian distribution
-        for t in range(T):
-            # epsilon_t: Generate a random matrix to distribute the standard deviations
-            noise = torch.randn_like(pred_logits)    
-            pred_logits_std_noise = pred_logits + std * noise
-            
-            # Change the shape of the prediction to: shape: batch_size x num_classes x seq len
-            pred_logits_std_noise = pred_logits_std_noise.permute(1,2,0)
-            
-            # CEL of gaussian distributed unaries and target
-            ce_loss = CEL(input=pred_logits_std_noise, target=targets)
-            
-            L += ce_loss
-               
-        L = (1/T) * L
+
+        seq_len, batch_size, num_classes = pred_logits.shape
+
+        # The T Monte Carlo draws are independent of one another, so they are drawn as one tensor
+        # and scored by a single cross entropy call rather than in a Python loop. This is the same
+        # estimator, for T times fewer kernels: on a launch-bound device the loop cost far more in
+        # dispatch than the draws cost in arithmetic.
+        # epsilon_t: Generate a random matrix to distribute the standard deviations
+        # dim: T x seq len x batch_size x num_classes
+        noise = torch.randn((T,) + pred_logits.shape,
+                            dtype=pred_logits.dtype, device=pred_logits.device)
+        pred_logits_std_noise = pred_logits + std * noise
+
+        # Change the shape of the prediction to: shape: (T * batch_size) x num_classes x seq len,
+        # i.e. the draws laid out along the batch, which is the dimension cross entropy reduces over
+        # independently.
+        pred_logits_std_noise = pred_logits_std_noise.permute(0, 2, 3, 1) \
+                                                     .reshape(T * batch_size, num_classes, seq_len)
+
+        # CEL of gaussian distributed unaries and target
+        L = CEL(input=pred_logits_std_noise, target=targets.repeat(T, 1))
+
+        L = (1/T) * L.view(T, batch_size, seq_len).sum(dim=0)
         # Mean over events in sequence
         L = torch.mean(L, dim=1)
         # Mean over batches

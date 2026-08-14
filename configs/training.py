@@ -17,8 +17,9 @@ COMMON = {
     'dropout': 0.1,
     'epochs': 100,
     # Epochs without a validation improvement before training stops. None runs all `epochs`, which
-    # is what the original repository did.
-    'early_stopping_patience': None,
+    # is what the original repository did; the checkpoint is the best epoch on validation either
+    # way, so stopping only saves the time the run would have spent not improving.
+    'early_stopping_patience': 10,
     'regularization_term': 1e-4,
     'teacher_forcing_ratio': 0.8,
     'shuffle': True,
@@ -37,21 +38,25 @@ DATASETS = {
         'scheduler_min_lr': 1e-9,
         'batch_size': 128,
     },
+    # The two bpic datasets train on 700k+ windows each. The step is bound by kernel launches
+    # rather than by arithmetic, so a batch four times wider costs almost the same per step and
+    # buys four times fewer steps per epoch; the learning rate is scaled linearly with it, from the
+    # 1e-6 the original 256-window batch used, to keep the per-sample step size the same.
     'bpic17': COMMON | {
         'optimizer': 'adam',
-        'learning_rate': 1e-6,
+        'learning_rate': 4e-6,
         'scheduler_factor': 0.1,
         'scheduler_patience': 2,
         'scheduler_min_lr': 1e-10,
-        'batch_size': 256,
+        'batch_size': 1024,
     },
     'bpic19': COMMON | {
         'optimizer': 'adam',
-        'learning_rate': 1e-6,
+        'learning_rate': 4e-6,
         'scheduler_factor': 0.1,
         'scheduler_patience': 2,
         'scheduler_min_lr': 1e-10,
-        'batch_size': 256,
+        'batch_size': 1024,
     },
 }
 
