@@ -24,6 +24,11 @@ NUM_SAMPLES = 10
 # what is drawn.
 BATCH_PREFIXES = 1024
 
+# Seed making the sampled suffixes reproducible. None leaves the global RNG alone, which is how the
+# comparison's runs were drawn. Whatever it is, it is stamped into the generations file, so a file
+# always says whether it can be reproduced.
+SEED = None
+
 # What `SuffixSampler` is built with, keyed by its own argument names, so that one dict configures
 # the sampler and is stamped into the generations file.
 SAMPLING = {

@@ -16,6 +16,9 @@ COMMON = {
     'num_layers': 4,
     'dropout': 0.1,
     'epochs': 100,
+    # Epochs without a validation improvement before training stops. None runs all `epochs`, which
+    # is what the original repository did.
+    'early_stopping_patience': None,
     'regularization_term': 1e-4,
     'teacher_forcing_ratio': 0.8,
     'shuffle': True,

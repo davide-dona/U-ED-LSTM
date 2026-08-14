@@ -1,7 +1,7 @@
 """
 Train the U-ED-LSTM on one of the encoded datasets.
 
-    python scripts/build_datasets.py --dataset sepsis
+    python scripts/build_datasets.py --dataset sepsis --data-root <preprocessing repo>/data
     python scripts/train.py --dataset sepsis
 
 Wires the model, the loss and the trainer together the same way the original training notebook
@@ -23,7 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 sys.path.insert(0, ROOT)
 
-from configs.data import ENCODED_DIR, MIN_SUFFIX_SIZE, encoded_stem  # noqa: E402
+from configs.data import checkpoint_path, encoded_stem  # noqa: E402
 from configs.training import DATASETS  # noqa: E402
 from loss.losses import Loss  # noqa: E402
 from model.dropout_uncertainty_enc_dec_LSTM.dropout_uncertainty_model import (  # noqa: E402
@@ -72,26 +72,13 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--dataset', required=True, choices=sorted(DATASETS),
                         help='Which encoded dataset to train on.')
-    parser.add_argument('--encoded-dir', default=ENCODED_DIR,
-                        help='Where `build_datasets.py` wrote the datasets.')
-    parser.add_argument('--min-suffix-size', type=int, default=MIN_SUFFIX_SIZE,
-                        help='The value the datasets were built with; part of their file names.')
-    parser.add_argument('--out', default=None,
-                        help='Checkpoint path. Defaults to checkpoints/<dataset>_u_ed_lstm.pkl.')
     parser.add_argument('--device', default=None,
                         help="Defaults to 'cuda' when available, otherwise 'cpu'.")
-    parser.add_argument('--epochs', type=int, default=None,
-                        help="Overrides the dataset's configured number of epochs.")
-    parser.add_argument('--batch-size', type=int, default=None,
-                        help="Overrides the dataset's configured batch size.")
-    parser.add_argument('--early-stopping-patience', type=int, default=None,
-                        help='Stop after this many epochs without validation improvement. '
-                             'Unset disables early stopping.')
     args = parser.parse_args()
 
     config = DATASETS[args.dataset]
 
-    stem = encoded_stem(args.encoded_dir, args.dataset, args.min_suffix_size)
+    stem = encoded_stem(args.dataset)
     data_train = torch.load(f'{stem}_train.pkl', weights_only=False)
     data_val = torch.load(f'{stem}_val.pkl', weights_only=False)
     print(f"Train windows: {len(data_train)}, validation windows: {len(data_val)}")
@@ -134,8 +121,8 @@ def main():
         'regularization_term': config['regularization_term'],
         'optimizer': optimizer,
         'scheduler': scheduler,
-        'epochs': args.epochs if args.epochs is not None else config['epochs'],
-        'mini_batches': args.batch_size if args.batch_size is not None else config['batch_size'],
+        'epochs': config['epochs'],
+        'mini_batches': config['batch_size'],
         'shuffle': config['shuffle'],
         'teacher_forcing_ratio': config['teacher_forcing_ratio'],
     }
@@ -147,7 +134,7 @@ def main():
         'gn_learning_rate': config['gn_learning_rate'],
     }
 
-    out = args.out or os.path.join('checkpoints', f'{args.dataset}_u_ed_lstm.pkl')
+    out = checkpoint_path(args.dataset)
     os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
 
     trainer = Trainer(device=device,
@@ -160,7 +147,7 @@ def main():
                       writer=writer,
                       gradnorm_values=gradnorm_values,
                       saving_path=out,
-                      early_stopping_patience=args.early_stopping_patience)
+                      early_stopping_patience=config['early_stopping_patience'])
 
     trainer.train_model()
     writer.close()

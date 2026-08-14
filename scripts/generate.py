@@ -3,12 +3,13 @@ Sample test set suffixes with a trained U-ED-LSTM and write them as the comparis
 
     python scripts/build_datasets.py --dataset sepsis --data-root <preprocessing repo>/data
     python scripts/train.py --dataset sepsis
-    python scripts/generate.py --dataset sepsis --model checkpoints/sepsis_u_ed_lstm.pkl
+    python scripts/generate.py --dataset sepsis
 
-Draws `--num-samples` suffixes per test prefix by MC suffix sampling, and the deterministic point
-prediction beside them. No metrics are computed here: the predictions are decoded back into the log's
-own alphabet and minutes and written as the Parquet the comparison scores every model from, which
-`pipelines/evaluate.py` of `probabilistic-suffix-prediction` reads.
+Draws `NUM_SAMPLES` suffixes per test prefix by MC suffix sampling, and the deterministic point
+prediction beside them. How a draw is made is `configs/generation.py`'s, and whatever it resolves to
+is stamped into the file that is written. No metrics are computed here: the predictions are decoded
+back into the log's own alphabet and minutes and written as the Parquet the comparison scores every
+model from, which `pipelines/evaluate.py` of `probabilistic-suffix-prediction` reads.
 """
 
 import argparse
@@ -25,8 +26,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 sys.path.insert(0, ROOT)
 
-from configs.data import DATASETS, ENCODED_DIR, MIN_SUFFIX_SIZE, encoded_stem  # noqa: E402
-from configs.generation import BATCH_PREFIXES, NUM_SAMPLES, SAMPLING  # noqa: E402
+from configs.data import DATASETS, checkpoint_path, encoded_stem  # noqa: E402
+from configs.generation import BATCH_PREFIXES, NUM_SAMPLES, SAMPLING, SEED  # noqa: E402
 from inference.generations import (  # noqa: E402
     MODEL_NAME,
     GenerationDecoder,
@@ -75,93 +76,39 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--dataset', required=True, choices=sorted(DATASETS),
                         help='Which encoded dataset to generate for.')
-    parser.add_argument('--model', required=True,
-                        help='Checkpoint to generate with, as written by scripts/train.py.')
-    parser.add_argument('--encoded-dir', default=ENCODED_DIR,
-                        help='Where `build_datasets.py` wrote the datasets.')
-    parser.add_argument('--min-suffix-size', type=int, default=MIN_SUFFIX_SIZE,
-                        help='The value the datasets were built with; part of their file names.')
-    parser.add_argument('--num-samples', type=int, default=NUM_SAMPLES,
-                        help='Suffixes drawn per test prefix, beside the point prediction. '
-                             f'Default: {NUM_SAMPLES}.')
-    parser.add_argument('--batch-prefixes', type=int, default=BATCH_PREFIXES,
-                        help='Prefixes decoded at once, and hence rows per Parquet row group. '
-                             f'Default: {BATCH_PREFIXES}.')
-    parser.add_argument('--dropout', type=float, default=None,
-                        help="Dropout rate to sample with. Defaults to the checkpoint's own.")
-
-    sampling_group = parser.add_argument_group(
-        'sampling',
-        'What a draw is, as against how fast it is produced. Defaults from configs/generation.py, '
-        'and whatever they resolve to is stamped into the file that is written.')
-    sampling_group.add_argument('--variance-cat', action=argparse.BooleanOptionalAction,
-                          default=SAMPLING['use_variance_cat'],
-                          help='Perturb the logits of a draw by their predicted spread.')
-    sampling_group.add_argument('--variance-num', action=argparse.BooleanOptionalAction,
-                          default=SAMPLING['use_variance_num'],
-                          help='Perturb a numerical mean by its predicted spread.')
-    sampling_group.add_argument('--sample-argmax', action=argparse.BooleanOptionalAction,
-                          default=SAMPLING['sample_argmax'],
-                          help='Take the argmax of the perturbed logits rather than sampling them.')
-    sampling_group.add_argument('--variational-dropout', action=argparse.BooleanOptionalAction,
-                          default=SAMPLING['variational_dropout_sampling'],
-                          help='Keep one decoder dropout mask for a whole suffix.')
-    sampling_group.add_argument('--positive-retries', type=int,
-                          default=SAMPLING['positive_retries'],
-                          help='Draws per step before a positive value gives up and reads zero.')
     parser.add_argument('--device', default=None,
                         help="Defaults to 'cuda' when available, otherwise 'cpu'.")
-    parser.add_argument('--seed', type=int, default=None,
-                        help='Seed making the sampled suffixes reproducible.')
-    parser.add_argument('--model-name', default=MODEL_NAME,
-                        help=f"Name this run is compared under. Default: '{MODEL_NAME}'.")
-    parser.add_argument('--tag', default=None,
-                        help='What tells two runs of this model on this dataset apart. Default: the '
-                             'current time, as %%Y%%m%%d-%%H%%M%%S.')
-    parser.add_argument('--out', default=None,
-                        help='Parquet file to write. Defaults to '
-                             'outputs/generations/<dataset>/<model>/<tag>.parquet.')
     args = parser.parse_args()
 
-    assert args.num_samples >= 1, \
-        ('A generations file holds the suffixes drawn per prefix, so --num-samples must be at least '
-         f'1, got {args.num_samples}.')
-
-    if args.seed is not None:
-        torch.manual_seed(args.seed)
+    if SEED is not None:
+        torch.manual_seed(SEED)
 
     device = torch.device(args.device or ('cuda' if torch.cuda.is_available() else 'cpu'))
-    run = RunIdentity(dataset=args.dataset, model=args.model_name, tag=args.tag or run_tag())
-    path = args.out or generations_path(run)
+    run = RunIdentity(dataset=args.dataset, model=MODEL_NAME, tag=run_tag())
+    path = generations_path(run)
 
-    stem = encoded_stem(args.encoded_dir, args.dataset, args.min_suffix_size)
+    stem = encoded_stem(args.dataset)
     dataset = torch.load(f'{stem}_test.pkl', weights_only=False)
 
-    model = DropoutUncertaintyEncoderDecoderLSTM.load(args.model, dropout=args.dropout)
+    checkpoint = checkpoint_path(args.dataset)
+    model = DropoutUncertaintyEncoderDecoderLSTM.load(checkpoint)
     model.eval()
 
-    # One dict, used to build the sampler and stamped into the file, so that what a generations file
-    # says it was drawn with is what it was drawn with.
-    sampling = {
-        'use_variance_cat': args.variance_cat,
-        'use_variance_num': args.variance_num,
-        'sample_argmax': args.sample_argmax,
-        'variational_dropout_sampling': args.variational_dropout,
-        'positive_retries': args.positive_retries,
-    }
-    settings = sampling | {
-        'num_samples': args.num_samples,
+    # `SAMPLING` both builds the sampler and is stamped into the file, so that what a generations
+    # file says it was drawn with is what it was drawn with.
+    settings = SAMPLING | {
+        'num_samples': NUM_SAMPLES,
         'dropout': float(model.dropout),
-        'checkpoint': args.model,
-        'seed': args.seed,
+        'checkpoint': checkpoint,
+        'seed': SEED,
     }
 
-    sampler = SuffixSampler(model=model, dataset=dataset, device=device, **sampling)
+    sampler = SuffixSampler(model=model, dataset=dataset, device=device, **SAMPLING)
     decoder = GenerationDecoder(dataset)
 
     order = generation_order(dataset)
     loader = DataLoader(dataset=Subset(dataset, order.tolist()),
-                        batch_size=args.batch_prefixes,
+                        batch_size=BATCH_PREFIXES,
                         shuffle=False)
     cut_points = torch.from_numpy(dataset.cuts[order, 1] - dataset.suffix_data_split_value)
 
@@ -182,7 +129,7 @@ def main():
                 row_indices=order[written:end],
                 sampled=sampler.sample(prefix=prefix,
                                        cut_points=batch_cuts,
-                                       num_samples=args.num_samples),
+                                       num_samples=NUM_SAMPLES),
                 point=sampler.point(prefix=prefix, cut_points=batch_cuts),
             )
             writer.write_table(table=table_from_rows(rows))

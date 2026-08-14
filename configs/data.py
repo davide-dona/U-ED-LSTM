@@ -27,20 +27,35 @@ SEQ_LEN_PRED = 4
 # Where `build_datasets.py` writes the encoded datasets and the other two scripts read them.
 ENCODED_DIR = 'encoded_data'
 
+# Where `train.py` writes a trained model and `generate.py` reads it back.
+CHECKPOINT_DIR = 'checkpoints'
 
-def encoded_stem(encoded_dir : str,
-                 dataset : str,
-                 min_suffix_size : int = MIN_SUFFIX_SIZE) -> str:
+
+def encoded_stem(dataset : str) -> str:
     """
     The path every file of one encoded dataset is named from.
 
+    `MIN_SUFFIX_SIZE` is part of the name, so datasets cut with different values would sit side by
+    side; the value is read from this module rather than passed, so the three scripts cannot disagree
+    on which of them they are looking at.
+
     ARGS:
-    - encoded_dir: Where the encoded datasets live.
     - dataset: Dataset name.
-    - min_suffix_size: The value the dataset was built with, which is part of its name: two datasets
-      cut with different values sit side by side.
 
     OUTPUTS:
     - stem: The path without the `_<split>.pkl` a caller appends.
     """
-    return os.path.join(encoded_dir, f'{dataset}_all_{min_suffix_size}')
+    return os.path.join(ENCODED_DIR, f'{dataset}_all_{MIN_SUFFIX_SIZE}')
+
+
+def checkpoint_path(dataset : str) -> str:
+    """
+    Where one dataset's trained model lives.
+
+    ARGS:
+    - dataset: Dataset name.
+
+    OUTPUTS:
+    - path: The file `train.py` saves to and `generate.py` loads from.
+    """
+    return os.path.join(CHECKPOINT_DIR, f'{dataset}_u_ed_lstm.pkl')

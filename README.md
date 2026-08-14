@@ -65,7 +65,7 @@ uv run scripts/build_datasets.py --dataset sepsis bpic17 bpic19 \
 uv run scripts/train.py --dataset sepsis
 
 # Sample 10 test set suffixes per prefix, as the comparison's generations file
-uv run scripts/generate.py --dataset sepsis --model checkpoints/sepsis_u_ed_lstm.pkl
+uv run scripts/generate.py --dataset sepsis
 ```
 
 What the adapter guarantees:
@@ -86,7 +86,11 @@ What the adapter guarantees:
 
 Three things to know before a long run:
 
-- The window geometry lives in `configs/data.py`, not in the scripts: `MIN_SUFFIX_SIZE` (the
+- Every setting lives in `configs/`, not in the scripts. The scripts take only what varies between
+  two runs on the same machine: `--dataset` and `--device`, plus `--data-root` when encoding. An
+  experiment is changed by editing a config file, so a run is reproducible from the tree it was
+  launched from.
+- The window geometry in particular lives in `configs/data.py`: `MIN_SUFFIX_SIZE` (the
   end-of-sequence events appended to every case) and `SEQ_LEN_PRED` (the trailing window positions
   the decoder predicts, which is the loader's `suffix_data_split_value`). Changing either
   invalidates the encoded datasets and every checkpoint trained on them.
@@ -105,12 +109,11 @@ ground truth. The run identity (`dataset`, `model`, `tag`) is stamped into the f
 metadata, so it still says what produced it once it has been moved next to the other models' results.
 
 - **It says how it was drawn.** Beside the identity, the file carries the settings the suffixes were
-  drawn with: the checkpoint, the seed, the dropout rate, and every flag of `configs/generation.py`
-  as the run resolved it. Those settings default from that file and are overridable per run
-  (`--no-variance-num`, `--sample-argmax`, `--variational-dropout`, ...), so what a file says it was
-  drawn with is what it was drawn with.
-- **Ten samples.** `--num-samples` defaults to 10, the smallest number the comparison's
-  hit-rate-at-10 can be read off, and what the other two models draw.
+  drawn with: the checkpoint, the seed, the dropout rate, and every entry of `configs/generation.py`'s
+  `SAMPLING` as the run resolved it. One dict both builds the sampler and is stamped into the file,
+  so what a file says it was drawn with is what it was drawn with.
+- **Ten samples.** `NUM_SAMPLES` in `configs/generation.py` is 10, the smallest number the
+  comparison's hit-rate-at-10 can be read off, and what the other two models draw.
 - **Every draw is independent.** The dropout masks are drawn per batch row, so repeating a prefix
   along the batch gives each of its 10 draws its own encoder and decoder dropout. All draws of a
   batch of prefixes therefore decode as one tensor batch, which is what makes bpic17's 250k prefixes
