@@ -50,6 +50,15 @@ Make sure you have [`uv`](https://docs.astral.sh/uv/getting-started/installation
 > [!NOTE]
 > The model/loss/trainer code here is pinned to the exact version that the pretrained checkpoints were trained with. A later revision of this repository changed the encoder/decoder architecture (added input projection + layer norm), which is **not** compatible with these checkpoints — verified by a strict `state_dict` load check.
 
+> [!NOTE]
+> `DropoutUncertaintyLSTMCell` holds the four gates as one stacked parameter per projection instead
+> of eight separate `nn.Linear` modules. This is a throughput change only: the cell computes the
+> same function, with the same per-gate dropout masks, the same two bias vectors per gate and the
+> same regularizer, and it still loads the pretrained checkpoints (the eight-Linear layout is
+> remapped on load). It is the parameter *layout* that changed, not the architecture. What it buys
+> is roughly five times fewer matmul kernels per training step, each four times wider, which is what
+> the model was actually bottlenecked on.
+
 ## Retraining on our datasets
 
 Supported datasets: **sepsis**, **bpic17**, **bpic19**. All three are driven off

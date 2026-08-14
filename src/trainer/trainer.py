@@ -137,18 +137,21 @@ class Trainer:
         val_losses = []
         val_attenuated_losses = []
 
-        # Validation dataloader
-        val_dataloader = DataLoader(dataset=self.data_val, batch_size=self.mini_batches, shuffle=self.shuffle, num_workers=4, pin_memory=True)
-        
+        # Dataloaders. Both are built once, outside the epoch loop, and keep their worker processes
+        # alive between epochs: respawning four workers per epoch costs more than the loading does
+        # on a dataset the size of sepsis, where an epoch is only 69 batches.
+        loader_values = dict(batch_size=self.mini_batches, shuffle=self.shuffle,
+                             num_workers=4, pin_memory=True,
+                             persistent_workers=True, prefetch_factor=4)
+        train_dataloader = DataLoader(dataset=self.data_train, **loader_values)
+        val_dataloader = DataLoader(dataset=self.data_val, **loader_values)
+
         # Teacher forcing reducing index:
         k = 1
 
         # Trainings/ Epoch Loop
         for epoch in tqdm(range(self.epochs)):
-            
-            # Train dataloader
-            train_dataloader = DataLoader(dataset=self.data_train, batch_size=self.mini_batches, shuffle=self.shuffle, num_workers=4, pin_memory=True)
-            
+
             epoch_cat_loss = {}
             epoch_num_loss = {}
 
@@ -168,12 +171,18 @@ class Trainer:
                 cats, nums, _ = train_data
 
                 # dim: list(list(Tensors categorical: dim: batch size x window size-4), list(Tensors numerical: dim: batch size x window size-4))
-                prefixes_cat = [cat[:, :-self.suffix_data_split_value].to(self.device) for cat in cats]
-                prefixes_num = [num[:, :-self.suffix_data_split_value].to(self.device) for num in nums]
+                # Transfer each feature whole and slice it on the device: a window is exactly its
+                # prefix plus its suffix, so this moves the same bytes in half as many copies, and
+                # every one of them is contiguous in pinned memory and so actually asynchronous.
+                cats = [cat.to(self.device, non_blocking=True) for cat in cats]
+                nums = [num.to(self.device, non_blocking=True) for num in nums]
+
+                prefixes_cat = [cat[:, :-self.suffix_data_split_value] for cat in cats]
+                prefixes_num = [num[:, :-self.suffix_data_split_value] for num in nums]
                 prefixes = [prefixes_cat, prefixes_num]
                 
-                suffixes_cat = [cat[:, -self.suffix_data_split_value:].to(self.device) for cat in cats]
-                suffixes_num = [num[:, -self.suffix_data_split_value:].to(self.device) for num in nums]
+                suffixes_cat = [cat[:, -self.suffix_data_split_value:] for cat in cats]
+                suffixes_num = [num[:, -self.suffix_data_split_value:] for num in nums]
                 suffixes = [suffixes_cat, suffixes_num]
                 
                 # GradNorm Training:
@@ -484,12 +493,18 @@ class Trainer:
                 cats, nums, _ = val_data    
                 
                 # dim: list(list(Tensors categorical: dim: batch size x window size-4), list(Tensors numerical: dim: batch size x window size-4))
-                prefixes_cat = [cat[:, :-self.suffix_data_split_value].to(self.device) for cat in cats]
-                prefixes_num = [num[:, :-self.suffix_data_split_value].to(self.device) for num in nums]
+                # Transfer each feature whole and slice it on the device: a window is exactly its
+                # prefix plus its suffix, so this moves the same bytes in half as many copies, and
+                # every one of them is contiguous in pinned memory and so actually asynchronous.
+                cats = [cat.to(self.device, non_blocking=True) for cat in cats]
+                nums = [num.to(self.device, non_blocking=True) for num in nums]
+
+                prefixes_cat = [cat[:, :-self.suffix_data_split_value] for cat in cats]
+                prefixes_num = [num[:, :-self.suffix_data_split_value] for num in nums]
                 prefixes = [prefixes_cat, prefixes_num]
                     
-                suffixes_cat = [cat[:, -self.suffix_data_split_value:].to(self.device) for cat in cats]
-                suffixes_num = [num[:, -self.suffix_data_split_value:].to(self.device) for num in nums]
+                suffixes_cat = [cat[:, -self.suffix_data_split_value:] for cat in cats]
+                suffixes_num = [num[:, -self.suffix_data_split_value:] for num in nums]
                 suffixes = [suffixes_cat, suffixes_num]
 
                 # Model predictions:
