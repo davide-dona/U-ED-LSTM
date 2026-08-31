@@ -11,7 +11,7 @@ defaulted separately in each script.
 import os
 
 # The datasets, i.e. the directories under the preprocessing repository's `data/`.
-DATASETS = ('sepsis', 'bpic17', 'bpic19')
+DATASETS = ('sepsis', 'bpic17', 'bpic17-dr', 'bpic19')
 
 # End-of-sequence events appended to every case. A window has to be at least this long, so that the
 # decoder's target is never padding, and a case's last window reaches exactly this far past its last

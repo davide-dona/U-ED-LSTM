@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from configs.event_log import COLUMN_RENAMES, EOS_LABEL, UNKNOWN_LABEL
+from configs.event_log import COLUMN_RENAMES, EOS_LABEL, TIME_TO_NEXT_KEY, UNKNOWN_LABEL
 
 from .spec import DatasetSpec, read_codec
 
@@ -181,11 +181,11 @@ class FeatureCodec:
                         for entry in [codec['activity'], codec['resource'],
                                       *codec['categorical_features']]}
 
-        # The codec names the two durations `ts_start` and `ts_prev`; this repository renames them
-        # on read, so their statistics are looked up under the codec's name and kept under ours.
+        # The codec names the two durations `ts_prev` and `ts_start`, the first under a key of its
+        # own and the second among the event features; this repository renames them on read, so
+        # their statistics are looked up under the codec's name and kept under ours.
         statistics = {COLUMN_RENAMES.get(entry['column'], entry['column']): entry
-                      for entry in [codec['ts_start'], codec['ts_prev'],
-                                    *codec['numeric_features']]}
+                      for entry in [codec[TIME_TO_NEXT_KEY], *codec['numeric_features']]}
 
         missing = [col for col in spec.categorical_columns if col not in vocabularies] \
             + [col for col in spec.continuous_columns if col not in statistics]

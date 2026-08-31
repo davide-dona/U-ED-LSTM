@@ -15,14 +15,18 @@ a spread the model was never scored on, so they follow the loss rather than bein
 
 from configs.event_log import CASE_ELAPSED_COLUMN, EVENT_ELAPSED_COLUMN
 
-# Suffixes drawn per test prefix. Ten is the smallest number the comparison's hit-rate-at-10 can be
-# read off, and is what the other two models draw.
-NUM_SAMPLES = 10
+# Suffixes drawn per test prefix. A hundred is what the comparison's distribution metrics are read
+# off, and what the other two models draw: the CVAE's `inference.evaluation_samples` and SuTraN's
+# own `NUM_SAMPLES`. Ten, the smallest number hit-rate-at-10 can be read from, is what the runs
+# before 2026-08-30 drew.
+NUM_SAMPLES = 100
 
-# Prefixes per batch, and hence per row group. Every prefix is decoded `NUM_SAMPLES` times over, so
-# this puts about ten thousand rows through the decoder at once. Throughput only: it does not change
-# what is drawn.
-BATCH_PREFIXES = 1024
+# Prefixes per batch, and hence per row group. Every prefix is decoded `NUM_SAMPLES` times over
+# *within one tensor batch* (`SuffixSampler.sample` repeats the prefix along the batch), so this
+# puts about thirteen thousand rows through the decoder at once. It was 1024 while `NUM_SAMPLES`
+# was 10, which is the same width; a hundred draws at that many prefixes would be a hundred
+# thousand. Throughput only: it does not change what is drawn.
+BATCH_PREFIXES = 128
 
 # Seed making the sampled suffixes reproducible. None leaves the global RNG alone, which is how the
 # comparison's runs were drawn. Whatever it is, it is stamped into the generations file, so a file

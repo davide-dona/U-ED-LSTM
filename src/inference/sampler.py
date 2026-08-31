@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from configs.event_log import CASE_ELAPSED_COLUMN, EOS_LABEL
+from configs.event_log import CASE_ELAPSED_COLUMN, EOS_LABEL, EVENT_ELAPSED_COLUMN
 from configs.generation import GROWING_COLUMNS, POSITIVE_COLUMNS, SAMPLING
 
 # Bounds the predicted log variances are read within. The training objective is defined on the log
@@ -71,6 +71,9 @@ class SuffixSampler:
         activity_column = dataset.spec.concept_name
         self.activity_slot = self.categorical_columns.index(activity_column)
         self.elapsed_slot = self.numerical_columns.index(CASE_ELAPSED_COLUMN)
+        # The wait before an event, which the decoder predicts per step beside the activity. The
+        # comparison reads it as the suffix's own timeline, one wait per generated event.
+        self.wait_slot = self.numerical_columns.index(EVENT_ELAPSED_COLUMN)
 
         labels = next(labels for column, _, labels in categorical_names if column == activity_column)
         self.eos_index = labels[EOS_LABEL]
@@ -90,7 +93,7 @@ class SuffixSampler:
     def sample(self,
                prefix : list,
                cut_points : torch.Tensor,
-               num_samples : int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+               num_samples : int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Draw `num_samples` stochastic suffixes for every prefix of a batch.
 
@@ -102,6 +105,8 @@ class SuffixSampler:
 
         OUTPUTS:
         - activities: Activity indices of every draw: [num_prefixes, num_samples, steps].
+        - waits: Encoded `event_elapsed_time` of every step of every draw, i.e. the wait before the
+          event at the same position: [num_prefixes, num_samples, steps].
         - lengths: Number of events of every draw: [num_prefixes, num_samples].
         - elapsed: Encoded `case_elapsed_time` of every draw's last event, or of the prefix's last
           event where the draw is empty: [num_prefixes, num_samples].
@@ -110,18 +115,20 @@ class SuffixSampler:
                     for tensors in prefix]
         repeated_cuts = cut_points.repeat_interleave(repeats=num_samples, dim=0)
 
-        activities, lengths, elapsed = self._decode(prefix=repeated,
-                                                    cut_points=repeated_cuts,
-                                                    stochastic=True)
+        activities, waits, lengths, elapsed = self._decode(prefix=repeated,
+                                                           cut_points=repeated_cuts,
+                                                           stochastic=True)
 
         num_prefixes = cut_points.shape[0]
         return (activities.view(num_prefixes, num_samples, -1),
+                waits.view(num_prefixes, num_samples, -1),
                 lengths.view(num_prefixes, num_samples),
                 elapsed.view(num_prefixes, num_samples))
 
     def point(self,
               prefix : list,
-              cut_points : torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+              cut_points : torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
+                                                  torch.Tensor]:
         """
         Decode the deterministic suffix of every prefix of a batch.
 
@@ -139,7 +146,8 @@ class SuffixSampler:
     def _decode(self,
                 prefix : list,
                 cut_points : torch.Tensor,
-                stochastic : bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                stochastic : bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
+                                            torch.Tensor]:
         """
         Free-run the decoder over a batch of prefixes until every row has ended.
 
@@ -170,6 +178,7 @@ class SuffixSampler:
         lengths = torch.zeros(batch_size, dtype=torch.int64, device=self.device)
         elapsed = last_numericals[self.elapsed_slot].clone() # [B, 1]
         steps = []
+        waits = []
 
         for step in range(int(max_steps.max().item()) + 1):
             activity = categoricals[self.activity_slot].squeeze(1) # [B]
@@ -179,6 +188,11 @@ class SuffixSampler:
 
             active = ~finished
             steps.append(torch.where(active, activity, torch.zeros_like(activity)))
+            # The wait is recorded with the event it leads up to - both come off the same draw -
+            # and zeroed on a row that has already ended, exactly as its activity is: nothing
+            # past a row's length is ever read.
+            wait = numericals[self.wait_slot].squeeze(1) # [B]
+            waits.append(torch.where(active, wait, torch.zeros_like(wait)))
             lengths += active.to(lengths.dtype)
             elapsed = torch.where(active.unsqueeze(1), numericals[self.elapsed_slot], elapsed)
 
@@ -191,10 +205,12 @@ class SuffixSampler:
 
         if steps:
             activities = torch.stack(tensors=steps, dim=1) # [B, steps]
+            drawn_waits = torch.stack(tensors=waits, dim=1) # [B, steps]
         else:
             activities = torch.zeros((batch_size, 0), dtype=torch.int64, device=self.device)
+            drawn_waits = torch.zeros((batch_size, 0), dtype=torch.float32, device=self.device)
 
-        return activities, lengths, elapsed.squeeze(1)
+        return activities, drawn_waits, lengths, elapsed.squeeze(1)
 
     def _draw(self,
               predictions : list,

@@ -14,6 +14,14 @@ CASE_ELAPSED_COLUMN = 'case_elapsed_time'
 EVENT_ELAPSED_COLUMN = 'event_elapsed_time'
 COLUMN_RENAMES = {'ts_start': CASE_ELAPSED_COLUMN, 'ts_prev': EVENT_ELAPSED_COLUMN}
 
+# Where the codec declares those same two columns. The time till next event has a key of its own,
+# while the time since case start is one of the event features the preprocessing pipeline derives
+# from the timestamp, and so sits inside `numeric_features` with the calendar features. Only the
+# codec's layout is meant here: the columns it names are still 'ts_prev' and 'ts_start', which is
+# what `COLUMN_RENAMES` keys off.
+TIME_TO_NEXT_KEY = 'time_to_next'
+CASE_ELAPSED_KEY = 'ts_start'
+
 # The remaining time to the end of the case. It is what the suffix predicts, so it must never be
 # read as an input feature.
 REMAINING_TIME_COLUMN = 'rtime'

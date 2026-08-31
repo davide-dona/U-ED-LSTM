@@ -14,6 +14,7 @@ from configs.data import MIN_SUFFIX_SIZE, SEQ_LEN_PRED
 from configs.event_log import (
     CASE_COLUMN,
     CASE_ELAPSED_COLUMN,
+    CASE_ELAPSED_KEY,
     EVENT_ELAPSED_COLUMN,
     REMAINING_TIME_COLUMN,
 )
@@ -92,10 +93,17 @@ def spec_from_codec(dataset: str,
     categorical_columns = (activity_column, resource_column) \
         + tuple(feature['column'] for feature in codec['categorical_features'])
 
-    # `numeric_features` already holds the calendar features (day in week, seconds in day), which
-    # both models read as standardized numbers rather than as categories.
+    # `numeric_features` holds the time since case start beside the calendar features (the cyclical
+    # day in week and seconds in day), which both models read as standardized numbers rather than as
+    # categories. The time since case start is read as one of the two leading duration channels
+    # instead, so it is filtered out here rather than listed a second time under the codec's name.
+    numeric_columns = [feature['column'] for feature in codec['numeric_features']]
+    assert CASE_ELAPSED_KEY in numeric_columns, \
+        (f"'{dataset}' declares no '{CASE_ELAPSED_KEY}' event feature, which is the channel the "
+         f"remaining runtime is read off. Add it to the dataset's `event_features` in the "
+         f"preprocessing repository and preprocess it again")
     continuous_columns = (CASE_ELAPSED_COLUMN, EVENT_ELAPSED_COLUMN) \
-        + tuple(feature['column'] for feature in codec['numeric_features'])
+        + tuple(col for col in numeric_columns if col != CASE_ELAPSED_KEY)
 
     duplicates = [col for col in set(categorical_columns) | set(continuous_columns)
                   if (categorical_columns + continuous_columns).count(col) > 1]
