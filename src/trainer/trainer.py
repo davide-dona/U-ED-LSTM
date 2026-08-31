@@ -58,9 +58,16 @@ class Trainer:
         """
 
         # Standard Training parameters
-        self.device = device
-        print("Device: ", device)
-        self.model = model.to(device)
+        self.device = torch.device(device)
+        # The dataloaders below pin their batches, and the pin-memory thread pins on the
+        # process-wide current accelerator rather than on the device the batches are copied to
+        # (`pin_memory_device` has been deprecated and ignored since torch 2.13). Left at its
+        # default the current device is cuda:0, so training on any other GPU would still open a
+        # CUDA context on cuda:0 and hold its memory for the whole run.
+        if self.device.type == 'cuda':
+            torch.cuda.set_device(self.device)
+        print("Device: ", self.device)
+        self.model = model.to(self.device)
         print("Model: ", model)
         self.data_train = data_train
         print("Train Dataset: ", data_train)
@@ -114,7 +121,7 @@ class Trainer:
         # Kept on the compute device: it is read every step, and a host parameter would mean a
         # blocking host-to-device copy per step to weight the losses with.
         self.gn_weights = torch.nn.Parameter(torch.ones(self.number_tasks, dtype=torch.float,
-                                                        device=device))
+                                                        device=self.device))
         print("Initial GradNorm loss weights: ",self.gn_weights)
         self.l0 = None
         print("Initial loss values: ", self.l0)
