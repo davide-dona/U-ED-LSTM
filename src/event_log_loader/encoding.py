@@ -27,19 +27,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from configs.event_log import COLUMN_RENAMES, EOS_LABEL, TIME_TO_NEXT_KEY, UNKNOWN_LABEL
+from configs.event_log import EOT_LABEL, INTER_EVENT_TIME_KEY, UNKNOWN_LABEL
 
 from .spec import DatasetSpec, read_codec
 
 # The rows every categorical channel carries before its vocabulary.
 PAD_INDEX = 0
-EOS_INDEX = 1
+EOT_INDEX = 1
 UNK_INDEX = 2
 FIRST_VOCAB_INDEX = 3
 
 # The special rows, as the label map names them. Padding is absent: it stands for no value, and is
 # the one row a decoded run can never legitimately hold.
-SPECIAL_LABELS = {EOS_LABEL: EOS_INDEX, UNKNOWN_LABEL: UNK_INDEX}
+SPECIAL_LABELS = {EOT_LABEL: EOT_INDEX, UNKNOWN_LABEL: UNK_INDEX}
 
 
 @dataclass(frozen=True)
@@ -181,11 +181,10 @@ class FeatureCodec:
                         for entry in [codec['activity'], codec['resource'],
                                       *codec['categorical_features']]}
 
-        # The codec names the two durations `ts_prev` and `ts_start`, the first under a key of its
-        # own and the second among the event features; this repository renames them on read, so
-        # their statistics are looked up under the codec's name and kept under ours.
-        statistics = {COLUMN_RENAMES.get(entry['column'], entry['column']): entry
-                      for entry in [codec[TIME_TO_NEXT_KEY], *codec['numeric_features']]}
+        # The current codec records the inter-event duration separately and the elapsed duration
+        # among its numeric event features.
+        statistics = {entry['column']: entry
+                      for entry in [codec[INTER_EVENT_TIME_KEY], *codec['numeric_features']]}
 
         missing = [col for col in spec.categorical_columns if col not in vocabularies] \
             + [col for col in spec.continuous_columns if col not in statistics]
@@ -219,7 +218,7 @@ class FeatureCodec:
         linear in the number of events rather than in the number of windows they are cut into.
 
         ARGS:
-        - df: One split, one row per event, as `add_eos_events` returned it.
+        - df: One split, one row per event, as `add_eot_events` returned it.
 
         OUTPUTS:
         - categorical: int32, [num_events, num_categorical_columns].

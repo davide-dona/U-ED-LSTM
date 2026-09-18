@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from configs.event_log import CASE_ELAPSED_COLUMN, EOS_LABEL, EVENT_ELAPSED_COLUMN
+from configs.event_log import CASE_ELAPSED_COLUMN, EOT_LABEL, EVENT_ELAPSED_COLUMN
 from configs.generation import GROWING_COLUMNS, POSITIVE_COLUMNS, SAMPLING
 
 # Bounds the predicted log variances are read within. The training objective is defined on the log
@@ -76,7 +76,7 @@ class SuffixSampler:
         self.wait_slot = self.numerical_columns.index(EVENT_ELAPSED_COLUMN)
 
         labels = next(labels for column, _, labels in categorical_names if column == activity_column)
-        self.eos_index = labels[EOS_LABEL]
+        self.eos_index = labels[EOT_LABEL]
 
         self.growing = [column in growing_columns for column in self.numerical_columns]
         # The encoded value of a raw zero, which is what a positive column is sampled above.
@@ -105,10 +105,10 @@ class SuffixSampler:
 
         OUTPUTS:
         - activities: Activity indices of every draw: [num_prefixes, num_samples, steps].
-        - waits: Encoded `event_elapsed_time` of every step of every draw, i.e. the wait before the
+        - waits: Encoded `inter_event_time` of every step of every draw, i.e. the wait before the
           event at the same position: [num_prefixes, num_samples, steps].
         - lengths: Number of events of every draw: [num_prefixes, num_samples].
-        - elapsed: Encoded `case_elapsed_time` of every draw's last event, or of the prefix's last
+        - elapsed: Encoded `ts_start` of every draw's last event, or of the prefix's last
           event where the draw is empty: [num_prefixes, num_samples].
         """
         repeated = [[tensor.repeat_interleave(repeats=num_samples, dim=0) for tensor in tensors]

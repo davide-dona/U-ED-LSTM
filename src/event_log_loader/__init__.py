@@ -12,7 +12,7 @@ One stage per module, in the order a dataset is built:
 
 from .encoding import FeatureCodec
 from .loader import PreSplitEventLogLoader
-from .reader import add_eos_events, read_split
+from .reader import add_eot_events, read_split
 from .spec import DatasetSpec, read_codec, spec_from_codec
 from .windows import WindowDataset, cut_points
 
@@ -21,7 +21,7 @@ __all__ = [
     'FeatureCodec',
     'PreSplitEventLogLoader',
     'WindowDataset',
-    'add_eos_events',
+    'add_eot_events',
     'cut_points',
     'read_codec',
     'read_split',

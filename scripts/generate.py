@@ -9,10 +9,11 @@ Draws `NUM_SAMPLES` suffixes per test prefix by MC suffix sampling, and the dete
 prediction beside them. How a draw is made is `configs/generation.py`'s, and whatever it resolves to
 is stamped into the file that is written. No metrics are computed here: the predictions are decoded
 back into the log's own alphabet and minutes and written as the Parquet the comparison scores every
-model from, which `pipelines/evaluate.py` of `probabilistic-suffix-prediction` reads.
+model from, which `pipelines/evaluate.py` of `suffix-generation` reads.
 """
 
 import argparse
+import hashlib
 import os
 import sys
 from datetime import datetime
@@ -43,7 +44,7 @@ from model.dropout_uncertainty_enc_dec_LSTM.dropout_uncertainty_model import (  
 
 def run_tag() -> str:
     """A tag telling two runs of this model on one dataset apart."""
-    return datetime.now().strftime('%Y%m%d-%H%M%S')
+    return datetime.now().strftime('%Y%m%d-%H%M%S-%f')
 
 
 def generations_path(run : RunIdentity) -> str:
@@ -51,12 +52,12 @@ def generations_path(run : RunIdentity) -> str:
     Where one run's generations file is written.
 
     Mirrors the layout of the comparison's own results (`src/paths.py` of the
-    `probabilistic-suffix-prediction` repository), with the model above the tag so one log's directory
+    `suffix-generation` repository), with the model above the run ID so one log's directory
     lists the models compared on it before any filename is read. The path is only a mirror: the run
     identity is stamped inside the file, so it can be moved next to the other models' results and
     still say what produced it.
     """
-    return os.path.join('outputs', 'generations', run.dataset, run.model, f'{run.tag}.parquet')
+    return os.path.join('outputs', 'generations', run.dataset, run.model, f'{run.run_id}.parquet')
 
 
 def generation_order(dataset) -> np.ndarray:
@@ -84,7 +85,7 @@ def main():
         torch.manual_seed(SEED)
 
     device = torch.device(args.device or ('cuda' if torch.cuda.is_available() else 'cpu'))
-    run = RunIdentity(dataset=args.dataset, model=MODEL_NAME, tag=run_tag())
+    run = RunIdentity(dataset=args.dataset, model=MODEL_NAME, run_id=run_tag())
     path = generations_path(run)
 
     stem = encoded_stem(args.dataset)
@@ -93,15 +94,6 @@ def main():
     checkpoint = checkpoint_path(args.dataset)
     model = DropoutUncertaintyEncoderDecoderLSTM.load(checkpoint)
     model.eval()
-
-    # `SAMPLING` both builds the sampler and is stamped into the file, so that what a generations
-    # file says it was drawn with is what it was drawn with.
-    settings = SAMPLING | {
-        'num_samples': NUM_SAMPLES,
-        'dropout': float(model.dropout),
-        'checkpoint': checkpoint,
-        'seed': SEED,
-    }
 
     sampler = SuffixSampler(model=model, dataset=dataset, device=device, **SAMPLING)
     decoder = GenerationDecoder(dataset)
@@ -114,7 +106,10 @@ def main():
 
     split = dataset.suffix_data_split_value
     written = 0
-    with open_generations(path=path, run=run, settings=settings) as writer:
+    with open(checkpoint, 'rb') as checkpoint_file:
+        checkpoint_sha256 = hashlib.file_digest(checkpoint_file, 'sha256').hexdigest()
+    with open_generations(path=path, run=run, checkpoint_sha256=checkpoint_sha256,
+                          vocabulary=decoder.vocabulary) as writer:
         for categoricals, numericals, _ in tqdm(loader, desc='Generating', unit='batch'):
             # The encoder reads the window minus the positions the decoder is trained to predict,
             # exactly as the trainer slices it.

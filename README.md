@@ -3,7 +3,7 @@
 ## Probabilistic Suffix Prediction Framework
 We predict a probability distribution of suffixes of business processes using our own U-ED-LSTM and MC Suffix Sampling Algorithm.
 
-This repository is trimmed to the core U-ED-LSTM model code, kept for retraining and comparison against other models. Dataset preprocessing, baseline model reimplementations, and evaluation/visualization are handled outside this repository, in `probabilistic-suffix-prediction`; an adapter here reads that repository's precomputed splits (see [Retraining on our datasets](#retraining-on-our-datasets)).
+This repository is trimmed to the core U-ED-LSTM model code, kept for retraining and comparison against other models. Dataset preprocessing, baseline model reimplementations, and evaluation/visualization are handled outside this repository, in `suffix-generation`; an adapter here reads that repository's precomputed splits (see [Retraining on our datasets](#retraining-on-our-datasets)).
 
 ## Setting Up the Python Environment with uv
 
@@ -33,7 +33,7 @@ Make sure you have [`uv`](https://docs.astral.sh/uv/getting-started/installation
 - `src/model/dropout_uncertainty_enc_dec_LSTM/`: the U-ED-LSTM architecture (encoder, decoder, and dropout-uncertainty LSTM cell).
 - `src/loss/losses.py`: the model's combined epistemic/aleatoric uncertainty loss.
 - `src/trainer/trainer.py`: the GradNorm-based training loop.
-- `src/event_log_loader/`: the read side of the format adapter, one module per stage. It reads the precomputed `train.csv` / `val.csv` / `test.csv` from `probabilistic-suffix-prediction` and turns them into datasets the trainer consumes unchanged. The original `CSV2EventLog`, `EventLogSplitter`, `EventLogLoader`, `EventLogDataset` and `TensorEncoderDecoder` were removed: we bring our own preprocessing, split, dataset and encoding.
+- `src/event_log_loader/`: the read side of the format adapter, one module per stage. It reads the precomputed `train.csv` / `val.csv` / `test.csv` from `suffix-generation` and turns them into datasets the trainer consumes unchanged. The original `CSV2EventLog`, `EventLogSplitter`, `EventLogLoader`, `EventLogDataset` and `TensorEncoderDecoder` were removed: we bring our own preprocessing, split, dataset and encoding.
   - `spec.py`: which features exist and how the windows are shaped, off the preprocessing codec.
   - `reader.py`: one split's own values, with the end-of-sequence events appended to every case.
   - `encoding.py`: the vocabularies and statistics the features are encoded through, off the codec.
@@ -61,14 +61,14 @@ Make sure you have [`uv`](https://docs.astral.sh/uv/getting-started/installation
 
 ## Retraining on our datasets
 
-Supported datasets: **sepsis**, **bpic17**, **bpic17-dr**, **bpic19**. All four are driven off
-`data/<dataset>/codec/dataset.json` in `probabilistic-suffix-prediction`, which is the single source
+Supported datasets: **sepsis**, **bpic13**, **bpic17**, **bpic19**. All four are driven off
+`data/<dataset>/codec/dataset.json` in `suffix-generation`, which is the single source
 of truth for the feature set, so both models read exactly the same features.
 
 ```bash
 # Encode the precomputed splits into encoded_data/
-uv run scripts/build_datasets.py --dataset sepsis bpic17 bpic17-dr bpic19 \
-    --data-root ~/GitHub/probabilistic-suffix-prediction/data
+uv run scripts/build_datasets.py --dataset sepsis bpic13 bpic17 bpic19 \
+    --data-root ~/GitHub/suffix-generation/data
 
 # Train
 uv run scripts/train.py --dataset sepsis
@@ -82,7 +82,7 @@ What the adapter guarantees:
 - **Same features.** Activity, resource, the two durations, and exactly the categorical and numerical
   attributes the codec declares. The remaining time is the prediction target and is never read as an
   input. The codec names the two durations in two places - the time till next event under
-  `time_to_next`, the time since case start among the event features, since that is what
+  `inter_event_time`, the time since case start among the event features, since that is what
   preprocessing derives it as - and the second is read as a duration channel rather than a second
   time as an attribute.
 - **Same encoding.** The codec's vocabularies and its training mean and deviation are read as given,
@@ -121,25 +121,24 @@ Three things to know before a long run:
 
 ## Generating suffixes
 
-`scripts/generate.py` writes `outputs/generations/<dataset>/<model>/<tag>.parquet`, the file the
+`scripts/generate.py` writes `outputs/generations/<dataset>/<model>/<run_id>.parquet`, the file the
 comparison scores every model from. It holds one row per test prefix, with 100 sampled activity
 suffixes, their per-event waits and their remaining runtimes nested inside it, the deterministic
-point prediction, and the ground truth. The run identity (`dataset`, `model`, `tag`) is stamped into the file's schema
-metadata, so it still says what produced it once it has been moved next to the other models' results.
+point prediction, and the ground truth. Its provenance metadata identifies the dataset, model,
+run ID, and source checkpoint; its activity vocabulary is stored alongside the coded suffixes.
 
-- **It says how it was drawn.** Beside the identity, the file carries the settings the suffixes were
-  drawn with: the checkpoint, the seed, the dropout rate, and every entry of `configs/generation.py`'s
-  `SAMPLING` as the run resolved it. One dict both builds the sampler and is stamped into the file,
-  so what a file says it was drawn with is what it was drawn with.
+- **It matches the comparison schema.** Activities are private-use-character strings keyed by the
+  vocabulary metadata, repeated sampled suffixes are folded with a per-draw index, and times use
+  the current `inter_event_time` field names and float32 storage.
 - **A hundred samples.** `NUM_SAMPLES` in `configs/generation.py` is 100, what the comparison's
   distribution metrics are read off and what the other two models draw: the CVAE's
   `inference.evaluation_samples` and SuTraN's own `NUM_SAMPLES`. Runs before 2026-08-30 drew 10,
   the smallest number hit-rate-at-10 can be read from.
 - **One wait per event.** Beside each activity suffix the file carries
-  `generated_time_to_next_minutes`, and the same for the point prediction and the ground truth.
+  `generated_inter_event_time_minutes`, and the same for the point prediction and the ground truth.
   A wait list runs exactly as far as the activity list beside it, so the two are read position for
   position: the wait at position `d` is the gap between the events at `d-1` and `d`, measured from
-  the last prefix event at `d = 0`. That is the `event_elapsed_time` the decoder already predicts at
+  the last prefix event at `d = 0`. That is the `inter_event_time` the decoder already predicts at
   every step, which is why this costs no head and no retraining of its own. It is *not* constrained
   against the remaining runtime below - the two come off different channels - so a draw's waits do
   not sum to its remaining runtime. SuTraN has the same split, and the comparison scores the two
@@ -148,18 +147,18 @@ metadata, so it still says what produced it once it has been moved next to the o
   along the batch gives each of its 100 draws its own encoder and decoder dropout. All draws of a
   batch of prefixes therefore decode as one tensor batch, which is what makes bpic17's 250k prefixes
   tractable - and why `BATCH_PREFIXES` is 128 rather than the 1024 that was right at 10 draws.
-- **Remaining time.** The model has no remaining runtime head. It predicts `case_elapsed_time` per
+- **Remaining time.** The model has no remaining runtime head. It predicts `ts_start` per
   event and is trained to keep it monotone, so a suffix's remaining runtime is its last event's
-  `case_elapsed_time` less the prefix's own. The ground truth is read the same way off the encoded
+  `ts_start` less the prefix's own. The ground truth is read the same way off the encoded
   split, which makes it the log's `rtime` column by identity.
 
 Score it from the other repository:
 
 ```bash
 uv run python -m pipelines.evaluate \
-    -g <this repo>/outputs/generations/sepsis/u-ed-lstm/<tag>.parquet
+    generations=<this repo>/outputs/generations/sepsis/u_ed_lstm/<run_id>.parquet
 ```
 
 ## What's not here
 
-Dataset download scripts, the full per-dataset loader/training/evaluation notebook pipeline, baseline model reimplementations (Camargo, Weytjens), and evaluation/visualization code have been removed. We use our own precomputed and pre-split datasets, and our own evaluation/visualization tooling (see `probabilistic-suffix-prediction`).
+Dataset download scripts, the full per-dataset loader/training/evaluation notebook pipeline, baseline model reimplementations (Camargo, Weytjens), and evaluation/visualization code have been removed. We use our own precomputed and pre-split datasets, and our own evaluation/visualization tooling (see `suffix-generation`).

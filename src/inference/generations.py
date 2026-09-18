@@ -1,6 +1,6 @@
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 import numpy as np
 import pyarrow as pa
@@ -8,42 +8,33 @@ import pyarrow.parquet as pq
 
 from configs.event_log import CASE_ELAPSED_COLUMN, EVENT_ELAPSED_COLUMN, UNKNOWN_LABEL
 
-# The schema metadata key the writing run's identity is stored under, so a generations file says what
-# produced it rather than leaving that to be read off the path it sits at.
-RUN_KEY = b'run'
-
-# The schema metadata key the settings the suffixes were drawn with are stored under, beside the run
-# identity. The comparison's reader takes the identity and ignores the rest, so this is ours to
-# record what a run cannot be reproduced without.
-SETTINGS_KEY = b'sampling'
+# Metadata keys required by suffix-generation's generation-store reader.
+PROVENANCE_KEY = b'provenance'
+VOCABULARY_KEY = b'activities'
 
 # What this fork calls itself in a run identity, and hence in the comparison's tables.
-MODEL_NAME = 'u-ed-lstm'
-
-# One run of activity names, the shape every activity column of the schema is built from.
-_ACTIVITIES = pa.list_(pa.field(name='element', type=pa.string()))
+MODEL_NAME = 'u_ed_lstm'
 
 # One run's wait until each of its activities. Timestamps are these accumulated, so they are not
 # written a second time.
-_TIMES_TO_NEXT = pa.list_(pa.field(name='element', type=pa.float64()))
+_INTER_EVENT_TIMES = pa.list_(pa.field(name='element', type=pa.float32()))
 
-# Field for field the schema of `src/inference/generation_store.py` in the comparison's repository,
-# the `element` names included: it compares schemas on read, so a file whose nested fields are named
-# anything else is not a file it can score.
 _SCHEMA = pa.schema(
     [
         ('case_id', pa.large_string()),
         ('prefix_len', pa.int64()),
-        ('prefix_activities', _ACTIVITIES),
-        ('generated_activities', pa.list_(pa.field(name='element', type=_ACTIVITIES))),
-        ('generated_time_to_next_minutes', pa.list_(pa.field(name='element', type=_TIMES_TO_NEXT))),
-        ('generated_remaining_time_minutes', pa.list_(pa.field(name='element', type=pa.float64()))),
-        ('point_activities', _ACTIVITIES),
-        ('point_time_to_next_minutes', _TIMES_TO_NEXT),
-        ('point_remaining_time_minutes', pa.float64()),
-        ('true_activities', _ACTIVITIES),
-        ('true_time_to_next_minutes', _TIMES_TO_NEXT),
-        ('true_remaining_time_minutes', pa.float64()),
+        ('prefix_activities', pa.string()),
+        ('generated_suffixes', pa.list_(pa.field(name='element', type=pa.string()))),
+        ('generated_draws', pa.list_(pa.field(name='element', type=pa.int16()))),
+        ('generated_inter_event_time_minutes',
+         pa.list_(pa.field(name='element', type=_INTER_EVENT_TIMES))),
+        ('generated_remaining_time_minutes', pa.list_(pa.field(name='element', type=pa.float32()))),
+        ('point_activities', pa.string()),
+        ('point_inter_event_time_minutes', _INTER_EVENT_TIMES),
+        ('point_remaining_time_minutes', pa.float32()),
+        ('true_activities', pa.string()),
+        ('true_inter_event_time_minutes', _INTER_EVENT_TIMES),
+        ('true_remaining_time_minutes', pa.float32()),
     ]
 )
 
@@ -59,30 +50,31 @@ class RunIdentity:
     ATTRIBUTES:
     - dataset: Name of the dataset generated for.
     - model: Name this run is compared under.
-    - tag: What tells two runs of one model on one dataset apart, by convention a `%Y%m%d-%H%M%S`
-      timestamp.
+    - run_id: What tells two runs of one model on one dataset apart, formatted as
+      `%Y%m%d-%H%M%S-%f`.
     """
 
     dataset: str
     model: str
-    tag: str
+    run_id: str
 
     def __str__(self):
-        """What a message calls this run, e.g. `sepsis/u-ed-lstm/20260813-142910`."""
-        return f'{self.dataset}/{self.model}/{self.tag}'
+        """What a message calls this run, e.g. `sepsis/u_ed_lstm/20260813-142910-123456`."""
+        return f'{self.dataset}/{self.model}/{self.run_id}'
 
 
 def open_generations(path : str,
                      run : RunIdentity,
-                     settings : dict) -> pq.ParquetWriter:
+                     checkpoint_sha256 : str,
+                     vocabulary : list[str]) -> pq.ParquetWriter:
     """
     Open a generations file for writing, creating the directories it sits in.
 
     ARGS:
     - path: The Parquet file to write. An existing file is overwritten.
     - run: The run whose identity is stamped into the file's schema metadata.
-    - settings: What the suffixes were drawn with, stamped beside the identity, so that the file
-      says how it was produced and not only by whom.
+    - checkpoint_sha256: SHA-256 digest of the checkpoint that produced the file.
+    - vocabulary: Activity labels in the code order used by the string columns.
 
     OUTPUTS:
     - writer: To be closed, or used as a context manager, by the caller.
@@ -91,8 +83,14 @@ def open_generations(path : str,
     if parent:
         os.makedirs(parent, exist_ok=True)
 
-    schema = _SCHEMA.with_metadata({RUN_KEY: json.dumps(asdict(run)).encode(),
-                                    SETTINGS_KEY: json.dumps(settings, sort_keys=True).encode()})
+    provenance = {
+        'dataset': run.dataset,
+        'model': run.model,
+        'run_id': run.run_id,
+        'checkpoint_sha256': checkpoint_sha256,
+    }
+    schema = _SCHEMA.with_metadata({PROVENANCE_KEY: json.dumps(provenance).encode(),
+                                    VOCABULARY_KEY: json.dumps(vocabulary).encode()})
     return pq.ParquetWriter(where=path, schema=schema)
 
 
@@ -134,6 +132,14 @@ class GenerationDecoder:
         self.names = [UNKNOWN_LABEL] * (max(labels.values()) + 1)
         for label, index in labels.items():
             self.names[index] = label
+        # suffix-generation stores activity strings as private-use characters and carries the
+        # corresponding labels in its schema metadata. Include every canonical special label even
+        # though this model cannot emit padding or start-of-suffix events.
+        self.vocabulary = ['PAD', 'EOT', 'SOS', UNKNOWN_LABEL,
+                           *[label for label, _ in sorted(labels.items(), key=lambda item: item[1])
+                             if label not in {'EOT', UNKNOWN_LABEL}]]
+        self.codes = {label: chr(0xE000 + index)
+                      for index, label in enumerate(self.vocabulary)}
 
     def rows(self,
              row_indices : np.ndarray,
@@ -188,22 +194,14 @@ class GenerationDecoder:
             rows.append({
                 'case_id': str(dataset.case_ids[case_indices[row]]),
                 'prefix_len': int(cut_point),
-                'prefix_activities': self._decode(events[start : start + cut_point]),
-                'generated_activities': [
-                    self._decode(sampled_activities[row, sample, :sampled_lengths[row, sample]])
-                    for sample in range(sampled_activities.shape[1])
-                ],
-                'generated_time_to_next_minutes': [
-                    sampled_minutes[row, sample, :sampled_lengths[row, sample]].tolist()
-                    for sample in range(sampled_activities.shape[1])
-                ],
-                'generated_remaining_time_minutes': sampled_remaining[row].tolist(),
-                'point_activities': self._decode(point_activities[row, :point_lengths[row]]),
-                'point_time_to_next_minutes': point_minutes[row, :point_lengths[row]].tolist(),
+                'prefix_activities': self._code(events[start : start + cut_point]),
+                **self._draws(sampled_activities[row], sampled_lengths[row],
+                              sampled_minutes[row], sampled_remaining[row]),
+                'point_activities': self._code(point_activities[row, :point_lengths[row]]),
+                'point_inter_event_time_minutes': point_minutes[row, :point_lengths[row]].tolist(),
                 'point_remaining_time_minutes': float(point_remaining[row]),
-                'true_activities': self._decode(
-                    events[start + cut_point : start + real_lengths[row]]),
-                'true_time_to_next_minutes': self._waits(
+                'true_activities': self._code(events[start + cut_point : start + real_lengths[row]]),
+                'true_inter_event_time_minutes': self._waits(
                     true_waits[start + cut_point : start + real_lengths[row]]).tolist(),
                 'true_remaining_time_minutes': float(true_elapsed[row] - prefix_elapsed[row]),
             })
@@ -213,6 +211,34 @@ class GenerationDecoder:
     def _decode(self, indices : np.ndarray) -> list[str]:
         """One run of activity indices, as the log's own names."""
         return [self.names[index] for index in indices.tolist()]
+
+    def _code(self, indices : np.ndarray) -> str:
+        """One activity run as suffix-generation's vocabulary-indexed character string."""
+        return ''.join(self.codes[label] for label in self._decode(indices))
+
+    def _draws(self,
+               activities : np.ndarray,
+               lengths : np.ndarray,
+               minutes : np.ndarray,
+               remaining : np.ndarray) -> dict:
+        """Fold identical sampled activity suffixes while preserving the time of every draw."""
+        suffixes = []
+        positions = {}
+        taken = []
+        for sample in range(activities.shape[0]):
+            suffix = self._code(activities[sample, :lengths[sample]])
+            taken.append(positions.setdefault(suffix, len(positions)))
+            if len(suffixes) == len(positions) - 1:
+                suffixes.append(suffix)
+        assert len(taken) <= np.iinfo(np.int16).max, 'Too many draws for generations schema'
+        return {
+            'generated_suffixes': suffixes,
+            'generated_draws': taken,
+            'generated_inter_event_time_minutes': [
+                minutes[sample, :lengths[sample]].tolist() for sample in range(activities.shape[0])
+            ],
+            'generated_remaining_time_minutes': remaining.tolist(),
+        }
 
     def _minutes(self, channel, encoded : np.ndarray) -> np.ndarray:
         """
@@ -226,7 +252,7 @@ class GenerationDecoder:
 
     def _waits(self, encoded : np.ndarray) -> np.ndarray:
         """
-        Encoded `event_elapsed_time` back in minutes, clamped at zero.
+        Encoded `inter_event_time` back in minutes, clamped at zero.
 
         A wait runs forwards, so no time at all is the least one can be. The sampler already draws
         this channel above a raw zero, but the ground truth and the point prediction pass through

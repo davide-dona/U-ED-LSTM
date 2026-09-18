@@ -11,9 +11,8 @@ import numpy as np
 import pandas as pd
 
 from configs.event_log import (
-    COLUMN_RENAMES,
     CSV_SEPARATOR,
-    EOS_LABEL,
+    EOT_LABEL,
     MIN_PREFIX_COLUMN,
     SPLITS,
 )
@@ -33,13 +32,12 @@ def read_split(spec : DatasetSpec,
     - data_root: The `data/` directory of the preprocessing repository.
 
     OUTPUTS:
-    - df: One row per event, in the file's own order, with the time columns renamed.
+    - df: One row per event, in the file's own order.
     """
     assert split in SPLITS, f"Unknown split '{split}', expected one of {SPLITS}"
 
-    reverse_renames = {new: old for old, new in COLUMN_RENAMES.items()}
-    raw_continuous = [reverse_renames.get(col, col) for col in spec.continuous_columns]
-    columns = [spec.case_name, *spec.categorical_columns, *raw_continuous, MIN_PREFIX_COLUMN]
+    columns = [spec.case_name, *spec.categorical_columns, *spec.continuous_columns,
+               MIN_PREFIX_COLUMN]
 
     # Case ids and categorical values are read as strings: sepsis case ids are bare letters and
     # bpic19 carries boolean-looking attributes that pandas would otherwise infer as numbers.
@@ -47,8 +45,6 @@ def read_split(spec : DatasetSpec,
 
     path = Path(data_root) / spec.name / 'processed' / f'{split}.csv'
     df = pd.read_csv(path, sep=CSV_SEPARATOR, usecols=columns, dtype=text_columns)
-    df = df.rename(columns=COLUMN_RENAMES)
-
     for col in spec.continuous_columns:
         df[col] = df[col].astype('float32')
 
@@ -74,13 +70,13 @@ def _group_cases(df : pd.DataFrame,
     return order, np.asarray(case_ids), counts
 
 
-def add_eos_events(df : pd.DataFrame,
+def add_eot_events(df : pd.DataFrame,
                    spec : DatasetSpec) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     """
     Append `min_suffix_size` end-of-sequence events to every case, grouping the rows by case.
 
-    Mirrors `CSV2EventLog._CSV2EventLog__add_last_rows`: every categorical column of an EOS event
-    holds the literal 'EOS', and every numerical column holds NaN, which the encoding pins to the
+    Every categorical column of an EOT event
+    holds the literal 'EOT', and every numerical column holds NaN, which the encoding pins to the
     training mean.
 
     ARGS:
@@ -88,9 +84,9 @@ def add_eos_events(df : pd.DataFrame,
     - spec: The dataset specification.
 
     OUTPUTS:
-    - augmented: The split with the EOS events appended, one contiguous block per case.
+    - augmented: The split with the EOT events appended, one contiguous block per case.
     - case_ids: The case identifiers, one per case.
-    - real_lengths: Number of real (non-EOS) events per case, aligned with `case_ids`.
+    - real_lengths: Number of real (non-EOT) events per case, aligned with `case_ids`.
     """
     order, case_ids, real_lengths = _group_cases(df, spec.case_name)
     ordered = df.iloc[order]
@@ -99,7 +95,7 @@ def add_eos_events(df : pd.DataFrame,
     augmented_offsets = np.concatenate(([0], np.cumsum(augmented_lengths)))
 
     # Row positions the real events take inside the augmented frame: every case's events land at the
-    # front of its block, the appended EOS events at the back.
+    # front of its block, the appended EOT events at the back.
     real_offsets = np.concatenate(([0], np.cumsum(real_lengths)))
     within_case = np.arange(len(ordered)) - np.repeat(real_offsets[:-1], real_lengths)
     real_positions = np.repeat(augmented_offsets[:-1], real_lengths) + within_case
@@ -112,13 +108,13 @@ def add_eos_events(df : pd.DataFrame,
 
     augmented = ordered.iloc[source].reset_index(drop=True)
 
-    is_eos = ~is_real
+    is_eot = ~is_real
     for col in spec.categorical_columns:
-        augmented.loc[is_eos, col] = EOS_LABEL
+        augmented.loc[is_eot, col] = EOT_LABEL
     for col in spec.continuous_columns:
-        augmented.loc[is_eos, col] = np.nan
+        augmented.loc[is_eot, col] = np.nan
 
-    # Rewritten wholesale rather than patched on the EOS rows, since the copied source row carries
+    # Rewritten wholesale rather than patched on the EOT rows, since the copied source row carries
     # the wrong case for every appended event.
     case_per_row = np.repeat(np.arange(len(case_ids)), augmented_lengths)
     augmented[spec.case_name] = case_ids[case_per_row]

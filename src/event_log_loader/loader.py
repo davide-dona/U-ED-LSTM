@@ -17,7 +17,7 @@ import numpy as np
 from configs.event_log import MIN_PREFIX_COLUMN, SPLITS
 
 from .encoding import FeatureCodec
-from .reader import add_eos_events, read_split
+from .reader import add_eot_events, read_split
 from .spec import DatasetSpec
 from .windows import WindowDataset, cut_points
 
@@ -37,7 +37,7 @@ class PreSplitEventLogLoader:
         self.codec = FeatureCodec.from_spec(spec, data_root)
         self.all_categories = self.codec.all_categories
 
-        self.splits = {split: add_eos_events(read_split(spec, split, data_root), spec)
+        self.splits = {split: add_eot_events(read_split(spec, split, data_root), spec)
                        for split in SPLITS}
 
     def get_dataset(self, split : str) -> WindowDataset:

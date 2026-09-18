@@ -50,10 +50,7 @@ DATASETS = {
         'scheduler_min_lr': 1e-10,
         'batch_size': 1024,
     },
-    # The same log, filtered down to its declined and rejected cases. Two thirds the windows and
-    # half the trace length of bpic17, but the same shape of log, so it trains with bpic17's
-    # hyperparameters rather than its own.
-    'bpic17-dr': COMMON | {
+    'bpic13': COMMON | {
         'optimizer': 'adam',
         'learning_rate': 4e-6,
         'scheduler_factor': 0.1,

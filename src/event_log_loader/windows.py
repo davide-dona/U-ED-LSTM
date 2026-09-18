@@ -30,7 +30,7 @@ def cut_points(spec : DatasetSpec,
       training run could already have seen.
     - match_reference_cuts: If true, emit exactly the cut points `k` in
       `[min_prefix_len, real_length - 1]`, i.e. the other model's test population, one window each.
-      If false, use this repository's own range, whose trailing all-EOS targets are what teach the
+      If false, use this repository's own range, whose trailing all-EOT targets are what teach the
       model to stop.
 
     OUTPUTS:

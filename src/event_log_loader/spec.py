@@ -16,6 +16,7 @@ from configs.event_log import (
     CASE_ELAPSED_COLUMN,
     CASE_ELAPSED_KEY,
     EVENT_ELAPSED_COLUMN,
+    INTER_EVENT_TIME_KEY,
     REMAINING_TIME_COLUMN,
 )
 
@@ -87,6 +88,10 @@ def spec_from_codec(dataset: str,
     """
     codec = read_codec(dataset, data_root)
 
+    assert INTER_EVENT_TIME_KEY in codec, \
+        (f"'{dataset}' uses the legacy codec schema without '{INTER_EVENT_TIME_KEY}'. "
+         f"Reprocess it with the current suffix-generation pipeline.")
+
     activity_column = codec['activity']['column']
     resource_column = codec['resource']['column']
 
@@ -118,7 +123,7 @@ def spec_from_codec(dataset: str,
                        categorical_columns=categorical_columns,
                        continuous_columns=continuous_columns,
                        # No prefix is ever truncated: the preprocessing pipeline already dropped the
-                       # cases longer than `max_trace_length`, and the appended EOS events extend a
+                       # cases longer than `max_trace_length`, and the appended EOT events extend a
                        # full-length case by exactly `min_suffix_size`.
                        window_size=codec['max_trace_length'] + min_suffix_size,
                        min_suffix_size=min_suffix_size,
